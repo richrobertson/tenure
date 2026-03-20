@@ -7,11 +7,12 @@ final case class TenantId(value: String) extends AnyVal
 final case class ResourceId(value: String) extends AnyVal
 final case class ClientId(value: String) extends AnyVal
 final case class LeaseId(value: UUID) extends AnyVal
+final case class RequestId(value: String) extends AnyVal
 
 final case class ResourceKey(tenantId: TenantId, resourceId: ResourceId)
 
 enum LeaseStatus:
-  case Active, Released, Expired
+  case Active, Released, Expired, Absent
 
 final case class LeaseRecord(
     leaseId: LeaseId,
@@ -21,21 +22,25 @@ final case class LeaseRecord(
     acquiredAt: Instant,
     expiresAt: Instant,
     releasedAt: Option[Instant],
-    lastRenewedAt: Option[Instant]
+    lastRenewedAt: Option[Instant],
+    fencingToken: Long,
+    version: Long
 ):
   def isActiveAt(at: Instant): Boolean =
     status == LeaseStatus.Active && expiresAt.isAfter(at)
 
 final case class LeaseView(
-    leaseId: LeaseId,
+    leaseId: Option[LeaseId],
     tenantId: TenantId,
     resourceId: ResourceId,
-    holderId: ClientId,
+    holderId: Option[ClientId],
     status: LeaseStatus,
-    acquiredAt: Instant,
-    expiresAt: Instant,
+    acquiredAt: Option[Instant],
+    expiresAt: Option[Instant],
     releasedAt: Option[Instant],
-    lastRenewedAt: Option[Instant]
+    lastRenewedAt: Option[Instant],
+    fencingToken: Long,
+    version: Long
 )
 
 object LeaseView:
@@ -46,13 +51,30 @@ object LeaseView:
       else LeaseStatus.Expired
 
     LeaseView(
-      leaseId = record.leaseId,
+      leaseId = Some(record.leaseId),
       tenantId = record.resourceKey.tenantId,
       resourceId = record.resourceKey.resourceId,
-      holderId = record.holderId,
+      holderId = Some(record.holderId),
       status = status,
-      acquiredAt = record.acquiredAt,
-      expiresAt = record.expiresAt,
+      acquiredAt = Some(record.acquiredAt),
+      expiresAt = Some(record.expiresAt),
       releasedAt = record.releasedAt,
-      lastRenewedAt = record.lastRenewedAt
+      lastRenewedAt = record.lastRenewedAt,
+      fencingToken = record.fencingToken,
+      version = record.version
+    )
+
+  def absent(resourceKey: ResourceKey): LeaseView =
+    LeaseView(
+      leaseId = None,
+      tenantId = resourceKey.tenantId,
+      resourceId = resourceKey.resourceId,
+      holderId = None,
+      status = LeaseStatus.Absent,
+      acquiredAt = None,
+      expiresAt = None,
+      releasedAt = None,
+      lastRenewedAt = None,
+      fencingToken = 0L,
+      version = 0L
     )

@@ -14,32 +14,61 @@ class LeaseServiceSpec extends CatsEffectSuite:
     for
       clock <- TestClock.create[IO](start)
       service <- LeaseService.inMemory[IO](clock)
-      acquired <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15))
+      acquired <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15, "req-1"))
       lease <- service.getLease(TenantId("tenant-a"), ResourceId("resource-1"))
     yield
       assert(acquired.isRight)
-      assertEquals(lease.map(_.status), Some(LeaseStatus.Active))
+      assertEquals(lease.found, true)
+      assertEquals(lease.lease.status, LeaseStatus.Active)
+  }
+
+  test("getLease returns found false with ABSENT lease when nothing exists") {
+    for
+      clock <- TestClock.create[IO](start)
+      service <- LeaseService.inMemory[IO](clock)
+      lease <- service.getLease(TenantId("tenant-a"), ResourceId("resource-1"))
+    yield
+      assertEquals(lease.found, false)
+      assertEquals(lease.lease.status, LeaseStatus.Absent)
   }
 
   test("expiration works with fake clock") {
     for
       clock <- TestClock.create[IO](start)
       service <- LeaseService.inMemory[IO](clock)
-      first <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 5))
+      first <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 5, "req-1"))
       _ <- clock.advanceSeconds(5)
-      second <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-2", 5))
+      second <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-2", 5, "req-2"))
     yield
       assert(first.isRight)
       assert(second.isRight)
+  }
+
+  test("reusing the same request_id for the same acquire is idempotent") {
+    for
+      clock <- TestClock.create[IO](start)
+      service <- LeaseService.inMemory[IO](clock)
+      first <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15, "req-1"))
+      second <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15, "req-1"))
+    yield assertEquals(second, first)
+  }
+
+  test("request_id reuse across different targets is rejected") {
+    for
+      clock <- TestClock.create[IO](start)
+      service <- LeaseService.inMemory[IO](clock)
+      _ <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15, "req-1"))
+      second <- service.acquire(AcquireRequest("tenant-a", "resource-2", "holder-1", 15, "req-1"))
+    yield assertEquals(second.left.toOption, Some(ServiceError.InvalidRequest("request_id cannot be reused for a different operation or resource")))
   }
 
   test("renew fails for wrong holder") {
     for
       clock <- TestClock.create[IO](start)
       service <- LeaseService.inMemory[IO](clock)
-      acquiredResult <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15))
+      acquiredResult <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15, "req-1"))
       acquired = acquiredResult.toOption.getOrElse(fail("expected successful acquire"))
-      renewed <- service.renew(RenewRequest("tenant-a", "resource-1", acquired.leaseId.value.toString, "holder-2", 15))
+      renewed <- service.renew(RenewRequest("tenant-a", "resource-1", acquired.lease.leaseId.map(_.value.toString).getOrElse(""), "holder-2", 15, "req-2"))
     yield assertEquals(renewed.left.toOption, Some(ServiceError.LeaseMismatch("lease holder or lease id did not match resource ResourceKey(TenantId(tenant-a),ResourceId(resource-1))")))
   }
 
@@ -47,16 +76,24 @@ class LeaseServiceSpec extends CatsEffectSuite:
     for
       clock <- TestClock.create[IO](start)
       service <- LeaseService.inMemory[IO](clock)
-      acquiredResult <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15))
+      acquiredResult <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15, "req-1"))
       acquired = acquiredResult.toOption.getOrElse(fail("expected successful acquire"))
-      released <- service.release(ReleaseRequest("tenant-a", "resource-1", acquired.leaseId.value.toString, "holder-2"))
+      released <- service.release(ReleaseRequest("tenant-a", "resource-1", acquired.lease.leaseId.map(_.value.toString).getOrElse(""), "holder-2", "req-2"))
     yield assert(released.left.exists(_.isInstanceOf[ServiceError.LeaseMismatch]))
+  }
+
+  test("validation rejects missing request_id") {
+    for
+      clock <- TestClock.create[IO](start)
+      service <- LeaseService.inMemory[IO](clock)
+      result <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15, ""))
+    yield assertEquals(result.left.toOption, Some(ServiceError.InvalidRequest("request_id must be non-empty")))
   }
 
   test("validation rejects non-positive ttl") {
     for
       clock <- TestClock.create[IO](start)
       service <- LeaseService.inMemory[IO](clock)
-      result <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 0))
+      result <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 0, "req-1"))
     yield assertEquals(result.left.toOption, Some(ServiceError.InvalidRequest("ttl_seconds must be positive")))
   }

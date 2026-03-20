@@ -19,7 +19,9 @@ object LeaseStateMachine:
   private def handleAcquire(state: LeaseState, command: Acquire, now: Instant): Either[LeaseError, (LeaseState, LeaseResult)] =
     state.get(command.resourceKey) match
       case Some(existing) if existing.isActiveAt(now) => Left(LeaseError.AlreadyHeld(existing))
-      case _ =>
+      case previous =>
+        val priorFencingToken = previous.map(_.fencingToken).getOrElse(0L)
+        val priorVersion = previous.map(_.version).getOrElse(0L)
         val record = LeaseRecord(
           leaseId = command.leaseId,
           resourceKey = command.resourceKey,
@@ -28,7 +30,9 @@ object LeaseStateMachine:
           acquiredAt = now,
           expiresAt = now.plusSeconds(command.ttlSeconds),
           releasedAt = None,
-          lastRenewedAt = None
+          lastRenewedAt = None,
+          fencingToken = priorFencingToken + 1L,
+          version = priorVersion + 1L
         )
         val nextState = LeaseState(state.leases.updated(command.resourceKey, record))
         Right(nextState -> LeaseResult.Acquired(record))
@@ -40,7 +44,11 @@ object LeaseStateMachine:
       case Some(existing) if existing.leaseId != command.leaseId || existing.holderId != command.holderId =>
         Left(LeaseError.LeaseMismatch(command.resourceKey))
       case Some(existing) =>
-        val renewed = existing.copy(expiresAt = now.plusSeconds(command.ttlSeconds), lastRenewedAt = Some(now))
+        val renewed = existing.copy(
+          expiresAt = now.plusSeconds(command.ttlSeconds),
+          lastRenewedAt = Some(now),
+          version = existing.version + 1L
+        )
         val nextState = LeaseState(state.leases.updated(command.resourceKey, renewed))
         Right(nextState -> LeaseResult.Renewed(renewed))
 
@@ -51,6 +59,6 @@ object LeaseStateMachine:
       case Some(existing) if existing.leaseId != command.leaseId || existing.holderId != command.holderId =>
         Left(LeaseError.LeaseMismatch(command.resourceKey))
       case Some(existing) =>
-        val released = existing.copy(status = LeaseStatus.Released, releasedAt = Some(now))
+        val released = existing.copy(status = LeaseStatus.Released, releasedAt = Some(now), version = existing.version + 1L)
         val nextState = LeaseState(state.leases.updated(command.resourceKey, released))
         Right(nextState -> LeaseResult.Released(released))

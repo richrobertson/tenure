@@ -22,9 +22,11 @@ The server listens on `0.0.0.0:8080`.
 ```bash
 curl -X POST http://localhost:8080/v1/leases/acquire \
   -H 'content-type: application/json' \
-  -d '{"tenantId":"acme","resourceId":"scheduler-primary","holderId":"worker-1","ttlSeconds":15}'
+  -d '{"tenant_id":"acme","resource_id":"scheduler-primary","holder_id":"worker-1","ttl_seconds":15,"request_id":"req-1"}'
 
 curl http://localhost:8080/v1/leases/acme/scheduler-primary
+
+# absent leases return 200 with {"found":false,...} rather than HTTP 404
 ```
 
 Because this milestone is intentionally single-node, there is no leader routing, persistence, Raft replication, or fencing token issuance yet.
