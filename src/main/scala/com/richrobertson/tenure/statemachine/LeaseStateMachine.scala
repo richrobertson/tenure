@@ -12,9 +12,11 @@ object LeaseState:
 object LeaseStateMachine:
   def transition(state: LeaseState, command: LeaseCommand, now: Instant): Either[LeaseError, (LeaseState, LeaseResult)] =
     command match
-      case acquire: Acquire => handleAcquire(state, acquire, now)
-      case renew: Renew     => handleRenew(state, renew, now)
-      case release: Release => handleRelease(state, release, now)
+      case acquire: Acquire if acquire.ttlSeconds <= 0 => Left(LeaseError.Validation("ttl_seconds must be positive"))
+      case renew: Renew if renew.ttlSeconds <= 0       => Left(LeaseError.Validation("ttl_seconds must be positive"))
+      case acquire: Acquire                            => handleAcquire(state, acquire, now)
+      case renew: Renew                                => handleRenew(state, renew, now)
+      case release: Release                            => handleRelease(state, release, now)
 
   private def handleAcquire(state: LeaseState, command: Acquire, now: Instant): Either[LeaseError, (LeaseState, LeaseResult)] =
     state.get(command.resourceKey) match

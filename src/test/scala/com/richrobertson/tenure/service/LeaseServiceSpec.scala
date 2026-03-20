@@ -67,8 +67,9 @@ class LeaseServiceSpec extends CatsEffectSuite:
       clock <- TestClock.create[IO](start)
       service <- LeaseService.inMemory[IO](clock)
       acquiredResult <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15, "req-1"))
-      acquired = acquiredResult.toOption.getOrElse(fail("expected successful acquire"))
-      renewed <- service.renew(RenewRequest("tenant-a", "resource-1", acquired.lease.leaseId.map(_.value.toString).getOrElse(""), "holder-2", 15, "req-2"))
+      acquired = acquireSuccess(acquiredResult)
+      leaseId = acquired.lease.leaseId.fold(fail("expected lease id in acquire result"))(_.value.toString)
+      renewed <- service.renew(RenewRequest("tenant-a", "resource-1", leaseId, "holder-2", 15, "req-2"))
     yield assertEquals(renewed.left.toOption, Some(ServiceError.LeaseMismatch("lease holder or lease id did not match resource ResourceKey(TenantId(tenant-a),ResourceId(resource-1))")))
   }
 
@@ -77,8 +78,9 @@ class LeaseServiceSpec extends CatsEffectSuite:
       clock <- TestClock.create[IO](start)
       service <- LeaseService.inMemory[IO](clock)
       acquiredResult <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15, "req-1"))
-      acquired = acquiredResult.toOption.getOrElse(fail("expected successful acquire"))
-      released <- service.release(ReleaseRequest("tenant-a", "resource-1", acquired.lease.leaseId.map(_.value.toString).getOrElse(""), "holder-2", "req-2"))
+      acquired = acquireSuccess(acquiredResult)
+      leaseId = acquired.lease.leaseId.fold(fail("expected lease id in acquire result"))(_.value.toString)
+      released <- service.release(ReleaseRequest("tenant-a", "resource-1", leaseId, "holder-2", "req-2"))
     yield assert(released.left.exists(_.isInstanceOf[ServiceError.LeaseMismatch]))
   }
 
@@ -97,3 +99,8 @@ class LeaseServiceSpec extends CatsEffectSuite:
       result <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 0, "req-1"))
     yield assertEquals(result.left.toOption, Some(ServiceError.InvalidRequest("ttl_seconds must be positive")))
   }
+
+  private def acquireSuccess(result: Either[ServiceError, AcquireResult]): AcquireResult =
+    result match
+      case Right(value) => value
+      case Left(error)  => fail(s"expected successful acquire, got $error")

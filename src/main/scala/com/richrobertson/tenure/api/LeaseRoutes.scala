@@ -1,6 +1,7 @@
 package com.richrobertson.tenure.api
 
 import cats.effect.kernel.Concurrent
+import cats.syntax.all.*
 import com.richrobertson.tenure.model.{LeaseStatus, LeaseView, ResourceId, TenantId}
 import com.richrobertson.tenure.service.*
 import io.circe.Codec
@@ -8,6 +9,7 @@ import io.circe.Decoder
 import io.circe.Encoder
 import io.circe.generic.extras.Configuration
 import io.circe.generic.extras.semiauto.*
+import org.http4s.DecodeFailure
 import org.http4s.HttpRoutes
 import org.http4s.circe.CirceEntityCodec.*
 import org.http4s.dsl.Http4sDsl
@@ -51,18 +53,24 @@ object LeaseRoutes:
 
     HttpRoutes.of[F] {
       case req @ POST -> Root / "v1" / "leases" / "acquire" =>
-        req.as[AcquireRequestBody].flatMap { body =>
-          service.acquire(AcquireRequest(body.tenantId, body.resourceId, body.holderId, body.ttlSeconds, body.requestId)).flatMap(resultToHttpAcquire(_)(using dsl))
+        decodeBody[F, AcquireRequestBody](req).flatMap {
+          case Right(body) =>
+            service.acquire(AcquireRequest(body.tenantId, body.resourceId, body.holderId, body.ttlSeconds, body.requestId)).flatMap(resultToHttpAcquire(_)(using dsl))
+          case Left(response) => response.pure[F]
         }
 
       case req @ POST -> Root / "v1" / "leases" / "renew" =>
-        req.as[RenewRequestBody].flatMap { body =>
-          service.renew(RenewRequest(body.tenantId, body.resourceId, body.leaseId, body.holderId, body.ttlSeconds, body.requestId)).flatMap(resultToHttpRenew(_)(using dsl))
+        decodeBody[F, RenewRequestBody](req).flatMap {
+          case Right(body) =>
+            service.renew(RenewRequest(body.tenantId, body.resourceId, body.leaseId, body.holderId, body.ttlSeconds, body.requestId)).flatMap(resultToHttpRenew(_)(using dsl))
+          case Left(response) => response.pure[F]
         }
 
       case req @ POST -> Root / "v1" / "leases" / "release" =>
-        req.as[ReleaseRequestBody].flatMap { body =>
-          service.release(ReleaseRequest(body.tenantId, body.resourceId, body.leaseId, body.holderId, body.requestId)).flatMap(resultToHttpRelease(_)(using dsl))
+        decodeBody[F, ReleaseRequestBody](req).flatMap {
+          case Right(body) =>
+            service.release(ReleaseRequest(body.tenantId, body.resourceId, body.leaseId, body.holderId, body.requestId)).flatMap(resultToHttpRelease(_)(using dsl))
+          case Left(response) => response.pure[F]
         }
 
       case GET -> Root / "v1" / "leases" / tenantId / resourceId =>
@@ -70,6 +78,17 @@ object LeaseRoutes:
           Ok(GetLeaseResponse(result.found, toLeaseResponse(result.lease)))
         }
     }
+
+  private def decodeBody[F[_]: Concurrent, A: Decoder](req: org.http4s.Request[F])(using dsl: Http4sDsl[F]): F[Either[org.http4s.Response[F], A]] =
+    import dsl.*
+    req.attemptAs[A].value.flatMap {
+      case Right(value) => Right(value).pure[F]
+      case Left(failure) =>
+        BadRequest(ErrorResponse("INVALID_ARGUMENT", renderDecodeFailure(failure))).map(_.asLeft[A])
+    }
+
+  private def renderDecodeFailure(failure: DecodeFailure): String =
+    Option(failure.message).map(_.trim).filter(_.nonEmpty).getOrElse("request body could not be decoded")
 
   private def resultToHttpAcquire[F[_]](result: Either[ServiceError, AcquireResult])(using dsl: Http4sDsl[F]): F[org.http4s.Response[F]] =
     import dsl.*
