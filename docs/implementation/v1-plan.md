@@ -6,6 +6,18 @@ This document maps the v1 architecture into a Scala-first backend plan without c
 
 The backend should be organized around an explicit replicated state machine. Domain rules for leases, expiration, fencing, and idempotency should remain visible in code rather than being hidden behind framework magic. Infrastructure concerns such as transport, Raft integration, persistence, and authentication should sit behind narrow interfaces. The preferred implementation shape is a pure core with effectful edges so correctness logic stays easy to read, test, and review.
 
+The default runtime target is a self-contained Linux daemon, not an orchestrator-native microservice. v1 should assume direct-host deployment on compute hosts or VMs, local durable storage, local configuration, and statically configured peers. Cluster correctness and startup must not depend on DNS, Kubernetes, external service discovery, or an external database.
+
+## Runtime boundaries
+
+The implementation should keep its correctness boundary small and explicit:
+
+- **Local config:** node identity, peer endpoints, policy defaults, and file paths come from local configuration.
+- **Local disk:** Raft state, snapshots, and materialized lease state are stored durably on local disk.
+- **Peer transport:** inter-node communication is a direct peer transport concern, not a service-mesh or discovery concern.
+- **Local credentials:** TLS or other credentials, if enabled, are loaded from local files rather than fetched from a remote control plane at startup.
+- **No DNS assumption:** peer communication and restart recovery must continue to work when only explicit node IDs and configured `IP:port` endpoints are available.
+
 ## Recommended implementation style
 
 - Use **Scala 3**.
@@ -54,6 +66,7 @@ A plausible Scala package or module layout for v1 is:
 - `service`: request orchestration, validation, idempotency coordination, and leader-only read enforcement.
 - `api`: transport-facing request and response models plus serialization adapters.
 - `routing`: leader resolution, placement lookup, and request forwarding decisions.
+- `transport`: peer transport interface plus the v1 TCP implementation used by the Raft layer.
 - `raft`: adapter boundary between Tenure commands and the embedded Raft library.
 - `persistence`: durable state abstractions for snapshots, log-adjacent metadata, and dedupe retention.
 - `auth`: tenant-scoped identity and authorization checks.
@@ -77,6 +90,7 @@ The first implementation should preserve clear seams for the following pieces:
 
 - **API layer:** parses requests, validates shape, maps errors, and does not contain lease-state business logic.
 - **Leader resolution / routing:** decides whether the local node can serve the request, whether to redirect, and how to preserve leader-only reads in v1.
+- **Peer transport interface:** gives the Raft layer an explicit boundary for node-to-node communication so the state machine does not know about sockets, connection reuse, or any future multiplexing details.
 - **Raft adapter boundary:** converts service-level commands into replicated log entries and exposes committed results back to the service layer.
 - **Lease state machine:** owns authoritative state transitions, fencing-token issuance, expiry decisions, and duplicate-request handling.
 - **Persistence abstraction:** hides storage details for snapshots, retained dedupe state, and any materialized lease indexes.
@@ -135,7 +149,7 @@ These areas should remain abstract in v1 so future sharding does not require an 
 - placement and routing
 - Raft group identity
 - storage backend details
-- network transport specifics
+- wire-level transport implementation details behind the peer transport interface
 
 ## Things that must remain explicit
 
@@ -146,3 +160,18 @@ These areas must remain explicit in code because they are central to correctness
 - request-id dedupe semantics
 - fencing-token issuance semantics
 - tenant-scoped identity and quotas
+
+## Peer transport guidance
+
+Inter-node transport is TCP in v1. The implementation should use simple long-lived peer connections between statically configured endpoints and should avoid introducing transport multiplexing in the first pass.
+
+Practical rules:
+
+- Prefer one clear non-multiplexed TCP transport path for Raft peer communication in v1.
+- Do not make hostname resolution a correctness dependency; configured `IP:port` endpoints are sufficient.
+- Keep connection lifecycle, backoff, and retry behavior inside the transport adapter rather than leaking it into lease logic or request handlers.
+- Do not treat UDP as a candidate transport for v1.
+
+## Transport abstraction note
+
+The Raft layer should depend on an explicit peer transport interface. In v1, that interface can be implemented by a simple non-multiplexed TCP adapter. If a future release adds transport multiplexing, it must arrive as a replaceable adapter behind the same abstraction rather than as a redesign of the state machine, service contract, or lease semantics.
