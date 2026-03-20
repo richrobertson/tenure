@@ -29,7 +29,7 @@ In v1, placement always resolves to one group. Client semantics are defined so t
 
 ## Guarantees
 
-- Linearizable lease operations for the active Raft group.
+- Linearizable lease operations for the active Raft group, with `GetLease` and `ListLeases` served by the leader in v1.
 - At most one valid lease holder per `(tenant_id, resource_id)` at a time.
 - Leader-mediated expiration and admission decisions.
 - Monotonic fencing tokens per resource.
