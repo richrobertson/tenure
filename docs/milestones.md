@@ -9,13 +9,13 @@
 - **Demo/test expectation:** A reviewer can walk the docs end to end and answer core questions about lease lifecycle, read consistency, expiration authority, retry behavior, bootstrap-safe runtime assumptions, and the v1 TCP transport choice.
 - **Done means:** The v1 contract is reviewable without requiring source code or implied behavior, including its P0 operating model and explicit non-dependencies.
 
-## Milestone 1: local single-node prototype
+## Milestone 1: local single-node prototype *(in progress: runnable prototype now in repo)*
 
 - **Objective:** Build a minimal local prototype of lease semantics without distributed replication.
 - **Deliverables:** In-memory lease state machine, local API surface, deterministic time abstraction, and basic request validation.
 - **Out of scope:** Raft replication, snapshots, and network hardening.
 - **Validation artifact:** Deterministic state-machine test suite output plus an API behavior matrix for acquire, renew, release, get, and list.
-- **Demo/test expectation:** Scripted demo showing one tenant, multiple resources, fake-clock expiry and renewal boundary tests, rejection of invalid TTLs or duplicate request IDs, and startup from local config with an explicit node ID and no DNS assumption.
+- **Demo/test expectation:** Scripted demo showing one tenant, multiple resources, fake-clock expiry and renewal boundary tests, rejection of invalid TTLs, tenant-scoped behavior, and local startup of the single-node HTTP prototype without any clustering or DNS assumption.
 - **Done means:** A single-node service enforces the documented lease contract with deterministic tests, fake-clock time control, no hidden time dependencies, and a runtime model that does not assume Kubernetes or external discovery.
 
 ## Milestone 2: embedded Raft integration and replicated lease log

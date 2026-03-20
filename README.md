@@ -50,7 +50,7 @@ Inter-node Raft communication uses statically configured TCP peer endpoints in v
 
 ## Status
 
-This repository is in the documentation-first bootstrap phase. The current contents define the v1 architecture, API contract, roadmap, and key architectural decisions.
+This repository now includes a runnable Milestone 1 single-node prototype alongside the documentation-first design scaffold. The current contents define the v1 architecture, API contract, roadmap, and key architectural decisions, plus a local Scala 3 implementation of acquire, renew, release, and get backed by an in-memory lease state machine.
 
 ## Project documents
 
@@ -63,6 +63,7 @@ This repository is in the documentation-first bootstrap phase. The current conte
 - [ADR: v1 single Raft group and logical multitenancy](docs/adr/0001-v1-single-raft-group-logical-multitenancy.md)
 - [Request-flow diagrams](docs/diagrams/request-flow.md)
 - [Terminology](docs/terminology.md)
+- [Milestone 1 local demo](docs/demo/milestone-1.md)
 
 ## Why leases are different from simple distributed locks
 
@@ -75,3 +76,26 @@ Tenure is intentionally scoped at the point where distributed-systems correctnes
 ## Future work
 
 Future milestones add a local prototype, embedded Raft integration, persistent recovery, observability, failure injection, and a sharding-ready routing layer while preserving the core client contract established in the docs.
+
+## Local prototype
+
+Milestone 1 now ships a minimal single-node HTTP service built with Scala 3, Cats Effect, and http4s. It keeps lease transition logic pure and deterministic, with effectful clock access and in-memory state isolated at the service edge.
+
+### Build and test
+
+```bash
+sbt test
+```
+
+### Run the prototype
+
+```bash
+sbt run
+```
+
+### Local API
+
+- `POST /v1/leases/acquire`
+- `POST /v1/leases/renew`
+- `POST /v1/leases/release`
+- `GET /v1/leases/{tenant_id}/{resource_id}`
