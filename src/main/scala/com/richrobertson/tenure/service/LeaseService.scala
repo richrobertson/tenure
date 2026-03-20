@@ -2,6 +2,7 @@ package com.richrobertson.tenure.service
 
 import cats.effect.kernel.Concurrent
 import cats.effect.kernel.Ref
+import cats.effect.std.Mutex
 import cats.syntax.all.*
 import com.richrobertson.tenure.model.*
 import com.richrobertson.tenure.statemachine.{LeaseState, LeaseStateMachine}
@@ -32,22 +33,35 @@ enum ServiceError derives CanEqual:
 private enum RequestOperation:
   case Acquire, Renew, Release
 
-private final case class StoredResponse(operation: RequestOperation, resourceKey: ResourceKey, result: Either[ServiceError, Any])
+private sealed trait StoredResult derives CanEqual
+private object StoredResult:
+  final case class Acquire(value: Either[ServiceError, AcquireResult]) extends StoredResult
+  final case class Renew(value: Either[ServiceError, RenewResult]) extends StoredResult
+  final case class Release(value: Either[ServiceError, ReleaseResult]) extends StoredResult
+
+private final case class StoredResponse(operation: RequestOperation, resourceKey: ResourceKey, result: StoredResult)
 private final case class ServiceState(leaseState: LeaseState, responses: Map[(TenantId, RequestId), StoredResponse])
 
 object LeaseService:
   def inMemory[F[_]: Concurrent](clock: Clock[F]): F[LeaseService[F]] =
-    Ref.of[F, ServiceState](ServiceState(LeaseState.empty, Map.empty)).map(ref => InMemoryLeaseService[F](ref, clock))
+    for
+      stateRef <- Ref.of[F, ServiceState](ServiceState(LeaseState.empty, Map.empty))
+      mutationLock <- Mutex[F]
+    yield InMemoryLeaseService[F](stateRef, mutationLock, clock)
 
-private final case class InMemoryLeaseService[F[_]: Concurrent](stateRef: Ref[F, ServiceState], clock: Clock[F]) extends LeaseService[F]:
+private final case class InMemoryLeaseService[F[_]: Concurrent](
+    stateRef: Ref[F, ServiceState],
+    mutationLock: Mutex[F],
+    clock: Clock[F]
+) extends LeaseService[F]:
 
   override def acquire(request: AcquireRequest): F[Either[ServiceError, AcquireResult]] =
     validateAcquire(request).fold(_.asLeft[AcquireResult].pure[F], valid =>
-      handleWithIdempotency(valid.requestContext, RequestOperation.Acquire) {
+      handleWithIdempotency(valid.requestContext, RequestOperation.Acquire)(StoredResult.Acquire.apply, replayAcquire) {
         Concurrent[F].delay(LeaseId.random()).flatMap { nextLeaseId =>
           clock.now.flatMap { now =>
             stateRef.modify { current =>
-              LeaseStateMachine.transition(current.leaseState, Acquire(valid.resourceKey, valid.holderId, valid.ttlSeconds, nextLeaseId), now) match
+              LeaseStateMachine.transition(current.leaseState, com.richrobertson.tenure.model.Acquire(valid.resourceKey, valid.holderId, valid.ttlSeconds, nextLeaseId), now) match
                 case Left(error) => current -> Left(mapError(error))
                 case Right((nextLeaseState, LeaseResult.Acquired(record))) =>
                   val response = AcquireResult(LeaseView.fromRecord(record, now), created = true)
@@ -61,10 +75,10 @@ private final case class InMemoryLeaseService[F[_]: Concurrent](stateRef: Ref[F,
 
   override def renew(request: RenewRequest): F[Either[ServiceError, RenewResult]] =
     validateRenew(request).fold(_.asLeft[RenewResult].pure[F], valid =>
-      handleWithIdempotency(valid.requestContext, RequestOperation.Renew) {
+      handleWithIdempotency(valid.requestContext, RequestOperation.Renew)(StoredResult.Renew.apply, replayRenew) {
         clock.now.flatMap { now =>
           stateRef.modify { current =>
-            LeaseStateMachine.transition(current.leaseState, Renew(valid.resourceKey, valid.leaseId, valid.holderId, valid.ttlSeconds.getOrElse(0L)), now) match
+            LeaseStateMachine.transition(current.leaseState, com.richrobertson.tenure.model.Renew(valid.resourceKey, valid.leaseId, valid.holderId, valid.ttlSeconds), now) match
               case Left(error) => current -> Left(mapError(error))
               case Right((nextLeaseState, LeaseResult.Renewed(record))) =>
                 val response = RenewResult(LeaseView.fromRecord(record, now), renewed = true)
@@ -77,10 +91,10 @@ private final case class InMemoryLeaseService[F[_]: Concurrent](stateRef: Ref[F,
 
   override def release(request: ReleaseRequest): F[Either[ServiceError, ReleaseResult]] =
     validateRelease(request).fold(_.asLeft[ReleaseResult].pure[F], valid =>
-      handleWithIdempotency(valid.requestContext, RequestOperation.Release) {
+      handleWithIdempotency(valid.requestContext, RequestOperation.Release)(StoredResult.Release.apply, replayRelease) {
         clock.now.flatMap { now =>
           stateRef.modify { current =>
-            LeaseStateMachine.transition(current.leaseState, Release(valid.resourceKey, valid.leaseId, valid.holderId), now) match
+            LeaseStateMachine.transition(current.leaseState, com.richrobertson.tenure.model.Release(valid.resourceKey, valid.leaseId, valid.holderId), now) match
               case Left(error) => current -> Left(mapError(error))
               case Right((nextLeaseState, LeaseResult.Released(record))) =>
                 val response = ReleaseResult(LeaseView.fromRecord(record, now), released = true)
@@ -103,7 +117,7 @@ private final case class InMemoryLeaseService[F[_]: Concurrent](stateRef: Ref[F,
 
   private final case class RequestContext(tenantId: TenantId, requestId: RequestId, resourceKey: ResourceKey)
   private final case class ValidAcquire(resourceKey: ResourceKey, holderId: ClientId, ttlSeconds: Long, requestContext: RequestContext)
-  private final case class ValidMutating(resourceKey: ResourceKey, leaseId: LeaseId, holderId: ClientId, ttlSeconds: Option[Long], requestContext: RequestContext)
+  private final case class ValidMutating(resourceKey: ResourceKey, leaseId: LeaseId, holderId: ClientId, ttlSeconds: Long, requestContext: RequestContext)
 
   private def validateAcquire(request: AcquireRequest): Either[ServiceError, ValidAcquire] =
     for
@@ -131,7 +145,7 @@ private final case class InMemoryLeaseService[F[_]: Concurrent](stateRef: Ref[F,
       parsedLeaseId <- parseLeaseId(leaseId).leftMap(ServiceError.InvalidRequest.apply)
       holder <- nonEmpty("holder_id", holderId).map(ClientId.apply)
       validatedTtl <- ttlSeconds.traverse(validateTtl)
-    yield ValidMutating(requestContext.resourceKey, parsedLeaseId, holder, validatedTtl, requestContext)
+    yield ValidMutating(requestContext.resourceKey, parsedLeaseId, holder, validatedTtl.getOrElse(0L), requestContext)
 
   private def validateRequestContext(tenantId: String, resourceId: String, requestId: String): Either[ServiceError, RequestContext] =
     for
@@ -150,30 +164,47 @@ private final case class InMemoryLeaseService[F[_]: Concurrent](stateRef: Ref[F,
   private def parseLeaseId(value: String): Either[String, LeaseId] =
     Either.catchNonFatal(java.util.UUID.fromString(value.trim)).leftMap(_ => "lease_id must be a valid UUID").map(LeaseId.apply)
 
-  private def handleWithIdempotency[A](requestContext: RequestContext, operation: RequestOperation)(compute: F[Either[ServiceError, A]]): F[Either[ServiceError, A]] =
-    stateRef.get.flatMap { current =>
-      current.responses.get((requestContext.tenantId, requestContext.requestId)) match
-        case Some(stored) if stored.operation == operation && stored.resourceKey == requestContext.resourceKey =>
-          stored.result.asInstanceOf[Either[ServiceError, A]].pure[F]
-        case Some(_) =>
-          ServiceError.InvalidRequest("request_id cannot be reused for a different operation or resource").asLeft[A].pure[F]
-        case None =>
-          compute.flatMap { result =>
-            stateRef.update(currentState => remember(currentState, requestContext, operation, currentState.leaseState, result.asInstanceOf[Either[ServiceError, Any]])) *> result.pure[F]
-          }
+  private def handleWithIdempotency[A](
+      requestContext: RequestContext,
+      operation: RequestOperation
+  )(
+      store: Either[ServiceError, A] => StoredResult,
+      replay: StoredResult => Option[Either[ServiceError, A]]
+  )(
+      compute: F[Either[ServiceError, A]]
+  ): F[Either[ServiceError, A]] =
+    mutationLock.lock.surround {
+      stateRef.get.flatMap { current =>
+        current.responses.get((requestContext.tenantId, requestContext.requestId)) match
+          case Some(stored) if stored.operation == operation && stored.resourceKey == requestContext.resourceKey =>
+            replay(stored.result).getOrElse(ServiceError.InvalidRequest("stored request replay type did not match operation").asLeft[A]).pure[F]
+          case Some(_) =>
+            ServiceError.InvalidRequest("request_id cannot be reused for a different operation or resource").asLeft[A].pure[F]
+          case None =>
+            compute.flatMap { result =>
+              stateRef.update(currentState =>
+                currentState.copy(
+                  responses = currentState.responses.updated(
+                    (requestContext.tenantId, requestContext.requestId),
+                    StoredResponse(operation, requestContext.resourceKey, store(result))
+                  )
+                )
+              ) *> result.pure[F]
+            }
+      }
     }
 
-  private def remember(
-      current: ServiceState,
-      requestContext: RequestContext,
-      operation: RequestOperation,
-      nextLeaseState: LeaseState,
-      result: Either[ServiceError, Any]
-  ): ServiceState =
-    current.copy(
-      leaseState = nextLeaseState,
-      responses = current.responses.updated((requestContext.tenantId, requestContext.requestId), StoredResponse(operation, requestContext.resourceKey, result))
-    )
+  private def replayAcquire(result: StoredResult): Option[Either[ServiceError, AcquireResult]] = result match
+    case StoredResult.Acquire(value) => Some(value)
+    case _                           => None
+
+  private def replayRenew(result: StoredResult): Option[Either[ServiceError, RenewResult]] = result match
+    case StoredResult.Renew(value) => Some(value)
+    case _                         => None
+
+  private def replayRelease(result: StoredResult): Option[Either[ServiceError, ReleaseResult]] = result match
+    case StoredResult.Release(value) => Some(value)
+    case _                           => None
 
   private def mapError(error: LeaseError): ServiceError =
     error match

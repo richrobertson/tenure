@@ -12,6 +12,7 @@ lazy val root = (project in file("."))
     name := "tenure",
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-effect" % catsEffectVersion,
+      "org.typelevel" %% "cats-effect-std" % catsEffectVersion,
       "org.http4s" %% "http4s-ember-server" % http4sVersion,
       "org.http4s" %% "http4s-dsl" % http4sVersion,
       "org.http4s" %% "http4s-circe" % http4sVersion,
