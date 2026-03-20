@@ -1,0 +1,29 @@
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Build outputs
+dist/
+build/
+out/
+target/
+coverage/
+
+# Logs
+*.log

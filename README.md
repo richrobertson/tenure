@@ -1,124 +1,71 @@
 # Tenure
 
-**Tenure** is a distributed lease coordination service that provides **exclusive, time-bounded ownership of shared resources** for multitenant systems.
+Tenure is a distributed lease coordination service for multitenant systems. It provides strongly consistent, time-bounded ownership of shared resources identified as `(tenant_id, resource_id)`.
 
-The service is designed for components that require a strongly consistent coordination primitive under failure, retry, and partition conditions. Typical use cases include leader election, singleton job execution, shard ownership, and coordination of access to externally mutable resources.
-
-Tenure is implemented as a replicated state machine. Lease state transitions are serialized through consensus, producing a single authoritative history for each resource. In v1, the system uses a **single Raft group with logical multitenancy**, with all resources scoped by `(tenant_id, resource_id)`.
-
----
+Unlike a simple distributed lock service, Tenure treats lease expiry, fencing, and replicated authoritative history as first-class concerns. The goal is to provide a durable blueprint for building a service that remains correct under retries, failover, and partial failure.
 
 ## Overview
 
-Tenure provides a coordination primitive that is:
+Tenure is modeled as a replicated state machine. Lease state transitions are serialized through consensus, and v1 intentionally runs all state through a **single shared Raft group with logical multitenancy**. That choice reduces implementation complexity while preserving strong correctness semantics and a clean path to future sharding.
 
-- **Strongly consistent**: lease operations are serialized through a replicated log  
-- **Time-bounded**: leases expire unless explicitly renewed  
-- **Failure-aware**: ownership is automatically revoked when clients fail  
-- **Multitenant**: all resources are isolated by tenant  
-- **Extensible**: designed to support future sharding without changing client semantics  
-
----
-
-## Requirements
-
-### Functional
-
-- Provide APIs for:
-  - `Acquire`
-  - `Renew`
-  - `Release`
-  - `GetLease`
-- Represent resources as `(tenant_id, resource_id)`
-- Support **exclusive leases only** (v1)
-- Grant leases with bounded TTLs
-- Require explicit renewal prior to expiration
-- Return a **fencing token** on successful acquisition
-- Support idempotent client requests via request IDs
-- Allow inspection of current lease state
-
-### Multitenancy
-
-- Enforce tenant isolation at API and state-machine layers
-- Prevent cross-tenant access or mutation
-- Support per-tenant quotas:
-  - max active leases
-  - max TTL
-  - request rate limits
-- Emit tenant-scoped observability signals
-
-### Consistency and correctness
-
-- Serialize all lease state transitions through consensus
-- Maintain a single authoritative ownership history per resource
-- Ensure at most one valid lease holder per `(tenant_id, resource_id)`
-- Provide fencing tokens for downstream stale-writer protection
-- Avoid correctness dependencies on:
-  - synchronized filesystem contents
-  - follower-local expiration decisions
-
-### Evolution
-
-- Maintain a stable client-facing API independent of placement
-- Define internal placement abstraction:
+The design introduces a placement abstraction now:
 
 ```text
 placement(tenant_id, resource_id) -> raft_group_id
 ```
 
-- Resolve all requests to a single group in v1
-- Preserve clear extension points for future sharding
+In v1, placement always resolves to one group. Client semantics are defined so that future sharding does not require an API redesign.
 
----
+## Requirements
+
+- Exclusive leases only in v1.
+- TTL-based acquisition, renewal, release, and inspection.
+- First-class multitenancy using `(tenant_id, resource_id)`.
+- Strongly consistent state transitions serialized through Raft.
+- Fencing tokens for stale-writer protection.
+- Idempotent client request IDs.
+- Local durable persistence on each node.
+- Explicit tenant isolation, quotas, and observability.
 
 ## Guarantees
 
-### Lease safety
+- Linearizable lease operations for the active Raft group.
+- At most one valid lease holder per `(tenant_id, resource_id)` at a time.
+- Leader-mediated expiration and admission decisions.
+- Monotonic fencing tokens per resource.
+- Durable recovery from local persisted Raft and state-machine state.
+- No cross-tenant access by API contract.
 
-For a given `(tenant_id, resource_id)`, lease operations are applied in a single globally ordered history. At most one lease is valid at any time.
+## Non-Goals
 
-### Linearizability
-
-Successful lease operations are linearizable with respect to the replicated state machine.
-
-### Time-bounded ownership
-
-Leases are granted with a TTL. Clients must renew before expiration or assume ownership is lost.
-
-### Fencing tokens
-
-Each successful lease grant returns a monotonically increasing fencing token (scoped to the resource). Downstream systems can use this to reject stale actors.
-
-### Failure tolerance
-
-Node failures and leader changes do not violate lease safety. Temporary unavailability may occur, but correctness is preserved.
-
-### Persistence model
-
-Each node maintains local durable state (Raft log, metadata, snapshots). The system replicates **commands**, not filesystem contents.
-
-### Expiration semantics
-
-Expiration is leader-mediated. Followers do not independently mutate authoritative lease state based on local clocks.
-
----
-
-## Non-Goals (v1)
-
-- Shared or reader-writer leases  
-- Multi-resource atomic acquisition  
-- Cross-tenant coordination  
-- Cross-shard transactions  
-- Multi-group Raft deployment (v1 is single group)  
-- Geo-distributed quorum placement  
-- Global fairness guarantees  
-- Hierarchical resource ownership  
-- General-purpose lock service abstraction  
-- Direct replication of files or directories  
-
----
+- Production implementation in this bootstrap pass.
+- Shared leases or multi-resource atomic acquisition.
+- Cross-tenant operations.
+- Immediate multi-group deployment.
+- Orchestration, CI/CD, benchmarking, or networking stack scaffolding.
 
 ## Status
 
-This repository is currently in the **architecture and planning phase**.  
-See [`docs/architecture/v1.md`](docs/architecture/v1.md) for the full design and [`docs/milestones.md`](docs/milestones.md) for the implementation roadmap.
+This repository is in the documentation-first bootstrap phase. The current contents define the v1 architecture, API contract, roadmap, and key architectural decisions.
+
+## Project documents
+
+- [Docs index](docs/index.md)
+- [Architecture spec](docs/architecture/v1.md)
+- [API contract](docs/api/lease-service.md)
+- [Milestones](docs/milestones.md)
+- [ADR: v1 single Raft group and logical multitenancy](docs/adr/0001-v1-single-raft-group-logical-multitenancy.md)
+- [Request-flow diagrams](docs/diagrams/request-flow.md)
+- [Terminology](docs/terminology.md)
+
+## Why leases are different from simple distributed locks
+
+A lock service can stop at mutual exclusion. A lease service must also define what happens when time passes, nodes fail, clients retry, or an old holder continues acting after ownership has logically expired. Tenure therefore treats TTLs, authoritative expiration decisions, idempotency, and fencing tokens as part of the core contract rather than optional details.
+
+## Why this project is interesting
+
+Tenure is intentionally scoped at the point where distributed-systems correctness becomes interesting without requiring a large codebase. It captures replicated state-machine design, lease semantics, multitenant isolation, persistence boundaries, and a realistic future-sharding story in a compact repository.
+
+## Future work
+
+Future milestones add a local prototype, embedded Raft integration, persistent recovery, observability, failure injection, and a sharding-ready routing layer while preserving the core client contract established in the docs.
