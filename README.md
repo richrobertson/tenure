@@ -54,6 +54,7 @@ This repository is in the documentation-first bootstrap phase. The current conte
 - [Architecture spec](docs/architecture/v1.md)
 - [API contract](docs/api/lease-service.md)
 - [Milestones](docs/milestones.md)
+- [Scala-first v1 implementation plan](docs/implementation/v1-plan.md)
 - [ADR: v1 single Raft group and logical multitenancy](docs/adr/0001-v1-single-raft-group-logical-multitenancy.md)
 - [Request-flow diagrams](docs/diagrams/request-flow.md)
 - [Terminology](docs/terminology.md)
