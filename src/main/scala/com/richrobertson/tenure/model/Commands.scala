@@ -18,7 +18,7 @@ object LeaseError:
     override def message: String = s"resource ${activeLease.resourceKey} is already held by ${activeLease.holderId.value}"
 
   final case class LeaseExpired(resourceKey: ResourceKey) extends LeaseError:
-    override def message: String = s"lease for resource $resourceKey has expired"
+    override def message: String = s"lease for resource $resourceKey is no longer active (expired or released)"
 
   final case class LeaseMismatch(resourceKey: ResourceKey) extends LeaseError:
     override def message: String = s"lease holder or lease id did not match resource $resourceKey"

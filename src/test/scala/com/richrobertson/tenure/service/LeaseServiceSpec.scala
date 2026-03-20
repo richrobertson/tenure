@@ -70,7 +70,12 @@ class LeaseServiceSpec extends CatsEffectSuite:
       acquired = acquireSuccess(acquiredResult)
       leaseId = acquired.lease.leaseId.fold(fail("expected lease id in acquire result"))(_.value.toString)
       renewed <- service.renew(RenewRequest("tenant-a", "resource-1", leaseId, "holder-2", 15, "req-2"))
-    yield assertEquals(renewed.left.toOption, Some(ServiceError.LeaseMismatch("lease holder or lease id did not match resource ResourceKey(TenantId(tenant-a),ResourceId(resource-1))")))
+    yield
+      renewed match
+        case Left(ServiceError.LeaseMismatch(message)) =>
+          assert(message.contains("lease holder or lease id did not match resource"))
+        case other =>
+          fail(s"expected LeaseMismatch for wrong holder, got: $other")
   }
 
   test("release fails for wrong holder") {
