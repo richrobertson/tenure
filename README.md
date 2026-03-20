@@ -1,6 +1,6 @@
 # Tenure
 
-Tenure is a distributed lease coordination service for multitenant systems. It provides strongly consistent, time-bounded ownership of shared resources identified as `(tenant_id, resource_id)`.
+Tenure is a distributed lease coordination service for multitenant systems. It provides strongly consistent, time-bounded ownership of shared resources identified as `(tenant_id, resource_id)`. In v1 it is intended to operate as a foundational P0 / tier-0 coordination daemon, not as an ordinary app-tier microservice.
 
 Unlike a simple distributed lock service, Tenure treats lease expiry, fencing, and replicated authoritative history as first-class concerns. The goal is to provide a durable blueprint for building a service that remains correct under retries, failover, and partial failure.
 
@@ -15,6 +15,10 @@ placement(tenant_id, resource_id) -> raft_group_id
 ```
 
 In v1, placement always resolves to one group. Client semantics are defined so that future sharding does not require an API redesign.
+
+The default operating model is a self-contained Linux daemon running directly on compute hosts or VMs with local durable state. v1 correctness depends on the local process, local disk, TCP/IP networking, local configuration, and local credentials. It does not depend on DNS, Kubernetes, or an external database.
+
+Inter-node Raft communication uses statically configured TCP peer endpoints in v1. Peer bootstrap and steady-state correctness use explicit node IDs plus concrete transport endpoints, and transport multiplexing is intentionally deferred until a stable transport abstraction proves necessary.
 
 ## Requirements
 
@@ -42,7 +46,7 @@ In v1, placement always resolves to one group. Client semantics are defined so t
 - Shared leases or multi-resource atomic acquisition.
 - Cross-tenant operations.
 - Immediate multi-group deployment.
-- Orchestration, CI/CD, benchmarking, or networking stack scaffolding.
+- Orchestration, CI/CD, benchmarking, or networking stack scaffolding beyond the documented v1 operating model.
 
 ## Status
 
@@ -52,6 +56,7 @@ This repository is in the documentation-first bootstrap phase. The current conte
 
 - [Docs index](docs/index.md)
 - [Architecture spec](docs/architecture/v1.md)
+- [Runtime operating model](docs/runtime/v1-operating-model.md)
 - [API contract](docs/api/lease-service.md)
 - [Milestones](docs/milestones.md)
 - [Scala-first v1 implementation plan](docs/implementation/v1-plan.md)

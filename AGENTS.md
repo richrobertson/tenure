@@ -59,3 +59,9 @@ Tenure is a documentation-first repository for a distributed lease coordination 
 ## Doc-first rule
 
 Any meaningful change to lease semantics, expiration behavior, Raft integration, multitenancy, persistence, or sharding must begin with or include a documentation update.
+
+## Runtime and transport guardrails
+
+- Preserve bootstrap-safe startup and correctness without requiring DNS or external control-plane dependencies.
+- Treat direct-host Linux daemon deployment as the default v1 operating model, even if container packaging is added later.
+- Keep peer transport behind an explicit abstraction so future multiplexing can be added without changing the state machine or lease semantics.

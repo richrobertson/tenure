@@ -6,8 +6,8 @@
 - **Deliverables:** README, architecture spec, API contract, ADR, diagrams, terminology, roadmap, and implementation plan.
 - **Out of scope:** Any runnable server or consensus integration.
 - **Validation artifact:** A doc review checklist covering architecture, API semantics, milestones, and implementation intent.
-- **Demo/test expectation:** A reviewer can walk the docs end to end and answer core questions about lease lifecycle, read consistency, expiration authority, and retry behavior.
-- **Done means:** The v1 contract is reviewable without requiring source code or implied behavior.
+- **Demo/test expectation:** A reviewer can walk the docs end to end and answer core questions about lease lifecycle, read consistency, expiration authority, retry behavior, bootstrap-safe runtime assumptions, and the v1 TCP transport choice.
+- **Done means:** The v1 contract is reviewable without requiring source code or implied behavior, including its P0 operating model and explicit non-dependencies.
 
 ## Milestone 1: local single-node prototype
 
@@ -15,8 +15,8 @@
 - **Deliverables:** In-memory lease state machine, local API surface, deterministic time abstraction, and basic request validation.
 - **Out of scope:** Raft replication, snapshots, and network hardening.
 - **Validation artifact:** Deterministic state-machine test suite output plus an API behavior matrix for acquire, renew, release, get, and list.
-- **Demo/test expectation:** Scripted demo showing one tenant, multiple resources, fake-clock expiry and renewal boundary tests, and rejection of invalid TTLs or duplicate request IDs.
-- **Done means:** A single-node service enforces the documented lease contract with deterministic tests, fake-clock time control, and no hidden time dependencies.
+- **Demo/test expectation:** Scripted demo showing one tenant, multiple resources, fake-clock expiry and renewal boundary tests, rejection of invalid TTLs or duplicate request IDs, and startup from local config with an explicit node ID and no DNS assumption.
+- **Done means:** A single-node service enforces the documented lease contract with deterministic tests, fake-clock time control, no hidden time dependencies, and a runtime model that does not assume Kubernetes or external discovery.
 
 ## Milestone 2: embedded Raft integration and replicated lease log
 
@@ -24,8 +24,8 @@
 - **Deliverables:** Single-group Raft integration, command replication path, leader forwarding/redirection behavior, and local durable log persistence.
 - **Out of scope:** Multi-group placement or rebalancing.
 - **Validation artifact:** Deterministic failover test output plus a replay transcript from persisted Raft state.
-- **Demo/test expectation:** Scripted demo showing leader-mediated mutation, `NOT_LEADER` handling for reads and writes, failover to a new leader, and successful replay after restart.
-- **Done means:** Mutating operations commit through one Raft group, and leader-only routing remains correct across leader change and process restart.
+- **Demo/test expectation:** Scripted demo showing leader-mediated mutation, `NOT_LEADER` handling for reads and writes, failover to a new leader, successful replay after restart, static-config bootstrap with explicit node IDs and `IP:port` endpoints, and TCP peer communication without multiplexing.
+- **Done means:** Mutating operations commit through one Raft group, leader-only routing remains correct across leader change and process restart, and cluster formation works without DNS or external service discovery.
 
 ## Milestone 3: lease state machine with acquire/renew/release/get
 
@@ -51,8 +51,8 @@
 - **Deliverables:** Persisted Raft metadata/log, state-machine snapshots, recovery procedure, and compaction strategy.
 - **Out of scope:** Cross-region backup orchestration.
 - **Validation artifact:** Restart/replay transcript plus a snapshot inspection checklist and deterministic recovery test output.
-- **Demo/test expectation:** Crash and restart tests recover authoritative lease state, dedupe history, and fencing-token progression from snapshot plus log replay, with a snapshot + log replay recovery demonstration.
-- **Done means:** Recovery preserves lease safety and idempotency semantics without requiring manual state reconstruction or hidden operator repair steps.
+- **Demo/test expectation:** Crash and restart tests recover authoritative lease state, dedupe history, and fencing-token progression from snapshot plus log replay, with a snapshot + log replay recovery demonstration that uses only local disk, local config, and peer connectivity.
+- **Done means:** Recovery preserves lease safety and idempotency semantics without requiring manual state reconstruction, hidden operator repair steps, or external control-plane dependencies.
 
 ## Milestone 6: observability and failure-injection testing
 
@@ -69,8 +69,8 @@
 - **Deliverables:** Internal `placement(tenant_id, resource_id) -> raft_group_id` abstraction, routing layer, and shard-compatible list semantics.
 - **Out of scope:** Live online rebalancing across many groups.
 - **Validation artifact:** Routing contract doc and request-flow demo through the placement API.
-- **Demo/test expectation:** Demonstrate that the service resolves placement before reads and writes while still targeting one shared group in v1.
-- **Done means:** Routing and placement are explicit implementation seams, and the client contract still matches the single-group behavior.
+- **Demo/test expectation:** Demonstrate that the service resolves placement before reads and writes while still targeting one shared group in v1, and that client/peer correctness does not depend on Kubernetes, DNS, or external service discovery.
+- **Done means:** Routing and placement are explicit implementation seams, the client contract still matches the single-group behavior, and the v1 transport path remains simple TCP without multiplexing.
 
 ## Milestone 8: hardening and benchmark/demo suite
 
