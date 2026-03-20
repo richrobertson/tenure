@@ -33,7 +33,8 @@ LeaseView {
 - All resources are addressed as `(tenant_id, resource_id)`.
 - `Acquire`, `Renew`, and `Release` require a client-supplied `request_id`.
 - `GetLease` is a leader-only linearizable read in v1.
-- `ListLeases` is also leader-only in v1.
+- `ListLeases` is also a leader-only linearizable read in v1.
+- Clients must route `GetLease` and `ListLeases` to the current leader in v1, or rely on server-side redirection if supported.
 - Follower-served reads are out of scope for v1.
 - Lease validity is determined by authoritative replicated state plus leader-mediated expiry rules, not by client-local wall clock.
 - TTL is validated against global service policy and per-tenant policy.
@@ -133,7 +134,8 @@ GetLeaseResponse {
 
 Semantics:
 - Returns the current materialized lease view for the resource in the addressed tenant.
-- In v1 this is a leader-only linearizable read. Clients must route the request to the current leader or retry after a `NOT_LEADER` response.
+- In v1 this is a leader-only linearizable read. Clients must route the request to the current leader, or rely on server-side redirection if the deployment supports it.
+- A replica that is not the current leader must return `NOT_LEADER` rather than serving a potentially stale read.
 - Followers do not transparently serve `GetLease` in v1.
 - Implementations may expose logically expired state as `EXPIRED` until compaction or replacement, but admission control is leader authoritative.
 
@@ -155,7 +157,8 @@ ListLeasesResponse {
 
 Semantics:
 - Lists leases within one tenant only.
-- In v1 this is leader-only. Clients must not assume transparent follower service.
+- In v1 this is a leader-only linearizable read. Clients must route the request to the current leader, or rely on server-side redirection if the deployment supports it.
+- A replica that is not the current leader must return `NOT_LEADER` rather than serving a potentially stale list response.
 - Cross-tenant listing is not supported.
 - The API should remain shard-compatible by avoiding any contract that implies global scans across all tenants.
 
@@ -196,7 +199,7 @@ Notes:
 - `ALREADY_HELD` indicates another active holder exists.
 - `LEASE_EXPIRED` indicates the target lease is no longer valid for renewal or release semantics.
 - `LEASE_MISMATCH` indicates holder or lease identity does not match authoritative state.
-- `NOT_LEADER` may include optional redirect metadata such as a leader hint or endpoint.
+- `NOT_LEADER` applies to leader-only reads as well as mutating operations, and may include optional redirect metadata such as a leader hint or endpoint.
 - `retryable` is advisory; client behavior must still distinguish transport retry from semantic retry.
 
 ## Error handling and retry guidance

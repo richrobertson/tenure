@@ -4,16 +4,46 @@
 
 This document maps the v1 architecture into a Scala-first backend plan without changing the architecture itself. The goal is to keep the implementation explicit, testable, and understandable to engineers who are not Scala specialists.
 
-The backend should be organized around an explicit replicated state machine. Domain rules for leases, expiration, fencing, and idempotency should remain visible in code rather than being hidden behind framework magic. Infrastructure concerns such as transport, Raft integration, persistence, and authentication should sit behind narrow interfaces.
+The backend should be organized around an explicit replicated state machine. Domain rules for leases, expiration, fencing, and idempotency should remain visible in code rather than being hidden behind framework magic. Infrastructure concerns such as transport, Raft integration, persistence, and authentication should sit behind narrow interfaces. The preferred implementation shape is a pure core with effectful edges so correctness logic stays easy to read, test, and review.
 
 ## Recommended implementation style
 
 - Use **Scala 3**.
+- Use **Cats Effect** as the preferred runtime model for effectful service code.
 - Keep the service architecture explicit and boring.
-- An effect system is acceptable, but the design should not depend on advanced framework features to express core lease semantics.
+- Follow a **pure core / effectful edges** structure.
 - Prefer algebraic data types, immutable state transitions, and explicit interfaces.
-- Keep the lease state machine framework-agnostic so the core logic can be tested without a network stack, storage engine, or Raft runtime.
-- Favor code that remains legible to senior backend engineers coming from Go, Java, or C#.
+- Keep the lease state machine framework-agnostic and pure so the core logic can be tested without a network stack, storage engine, or Raft runtime.
+- Favor code that remains legible to senior backend engineers coming from Go, Java, or C#, not only Scala specialists.
+
+## Intended pure/effectful split
+
+### Pure core
+
+The pure core should contain logic that depends only on inputs, authoritative state, and explicit policy values. Typical contents:
+
+- domain identifiers and value types
+- lease records
+- commands and responses
+- validation rules that depend only on inputs and state
+- state-machine transitions
+- fencing-token issuance semantics
+- dedupe semantics
+- expiry and admission logic given authoritative time
+
+### Effectful edges
+
+The effectful edges should orchestrate side effects and infrastructure concerns around that core. Typical contents:
+
+- API transport
+- Raft submit and wait-for-commit behavior
+- leader routing and discovery
+- persistence and snapshot IO
+- clock access
+- authorization and quota lookups
+- metrics and logging
+
+Cats Effect should be used to isolate side effects at service boundaries, keep transport and persistence concerns out of domain models, centralize time behind a clock abstraction, and support deterministic tests around pure state-machine transitions.
 
 ## Suggested module boundaries
 
@@ -31,7 +61,15 @@ A plausible Scala package or module layout for v1 is:
 - `time`: clock abstraction and time-calculation helpers.
 - `testkit`: fake clocks, in-memory stores, deterministic command drivers, and failure-test helpers.
 
-Dependency direction should stay inward: transport, Raft, persistence, and auth/quota adapters depend on domain contracts, while the pure state machine depends only on domain models and policy inputs.
+Dependency direction should stay inward:
+
+- `model` depends on nothing.
+- `statemachine` depends only on `model`.
+- `service` depends on `statemachine` plus explicit interfaces for routing, Raft submission, persistence, auth, quota, and time.
+- `api`, `routing`, `raft`, `persistence`, `auth`, `quota`, and `time` depend inward on `service` contracts rather than the reverse.
+- `testkit` may depend on any interface layer needed to provide deterministic fakes, but production correctness logic stays in `model` and `statemachine`.
+
+Correctness logic lives in `model` and `statemachine`. `service` orchestrates effects and dependency boundaries. `api`, `raft`, `persistence`, `routing`, `auth`, `quota`, and `time` are adapters or infrastructure-facing layers. Future sharding should remain a routing concern and must not leak into the core state machine.
 
 ## Core abstractions to keep explicit
 
@@ -56,7 +94,7 @@ Pure/domain-oriented pieces should include the domain models, commands, events, 
 - Centralize validation and state transitions so lease rules are not duplicated across handlers.
 - Isolate side effects at service boundaries.
 - Avoid leaking transport or storage concerns into domain models.
-- Prefer deterministic tests around state-machine transitions and policy checks.
+- Prefer deterministic tests around pure state-machine transitions and policy checks.
 - Keep serialization concerns separate from domain types where possible.
 - Represent error categories explicitly so retry guidance and API mapping stay mechanical.
 - Use a small explicit clock interface instead of calling wall-clock APIs throughout the codebase.
