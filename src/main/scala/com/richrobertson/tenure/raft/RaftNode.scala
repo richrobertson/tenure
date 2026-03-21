@@ -25,7 +25,24 @@ final case class NotLeader(leaderHint: Option[String]) derives CanEqual
 final case class PersistedMetadata(currentTerm: Long, votedFor: Option[String], commitIndex: Long, lastApplied: Long) derives CanEqual
 object PersistedMetadata:
   val initial: PersistedMetadata = PersistedMetadata(0L, None, 0L, 0L)
-  given Codec[PersistedMetadata] = deriveCodec
+  given Codec[PersistedMetadata] = Codec.from(
+    Decoder.instance { cursor =>
+      for
+        currentTerm  <- cursor.downField("currentTerm").as[Long]
+        votedFor     <- cursor.downField("votedFor").as[Option[String]]
+        commitIndex  <- cursor.downField("commitIndex").as[Long]
+        lastAppliedO <- cursor.downField("lastApplied").as[Option[Long]]
+      yield PersistedMetadata(
+        currentTerm = currentTerm,
+        votedFor = votedFor,
+        commitIndex = commitIndex,
+        lastApplied = lastAppliedO.getOrElse(commitIndex)
+      )
+    },
+    Encoder.forProduct4("currentTerm", "votedFor", "commitIndex", "lastApplied") { m =>
+      (m.currentTerm, m.votedFor, m.commitIndex, m.lastApplied)
+    }
+  )
 
 final case class RaftLogEntry(index: Long, term: Long, command: ReplicatedCommand) derives CanEqual
 object RaftLogEntry:
@@ -519,12 +536,10 @@ private final class LiveRaftNode[F[_]: Async](
         lastIncludedTerm = snapshotTerm,
         serviceState = state.materialized
       )
-      val compactedLog = state.log.filter(_.index > snapshot.lastIncludedIndex)
       for
         _ <- persistence.saveSnapshot(snapshot)
-        _ <- persistence.overwriteEntries(compactedLog)
-        compacted <- stateRef.updateAndGet(_.copy(snapshot = Some(snapshot), log = compactedLog))
-        _ <- persistMetadata(compacted)
+        updated <- stateRef.updateAndGet(_.copy(snapshot = Some(snapshot)))
+        _ <- persistMetadata(updated)
       yield ()
 
   private def lastLogIndex(state: RaftRuntimeState): Long =

@@ -8,7 +8,9 @@ import io.circe.syntax.*
 
 object ServiceCodecs:
   given Codec[RequestOperation] = Codec.from(
-    Decoder.decodeString.map(RequestOperation.valueOf),
+    Decoder.decodeString.emap { s =>
+      Either.catchNonFatal(RequestOperation.valueOf(s)).leftMap(_.getMessage)
+    },
     Encoder.encodeString.contramap(_.toString)
   )
 
