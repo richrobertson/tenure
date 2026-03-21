@@ -88,7 +88,7 @@ Milestone 4 is now complete. Milestone 5 still needs snapshotting and broader cr
 
 Milestone 1 delivered a minimal single-node HTTP service built with Scala 3, Cats Effect, and http4s. It provides a local API surface, an in-memory lease state machine, deterministic time abstraction for tests, request validation, and tenant-scoped resource identity using `(tenant_id, resource_id)`.
 
-The Milestone 3 prototype intentionally stays narrow: one shared Raft group, TCP peer RPCs without multiplexing, durable metadata/log persistence, deterministic replicated lease lifecycle semantics, and leader-only reads in v1. It still does not implement multi-group sharding, membership changes, quota policy, or full snapshot/compaction.
+The current prototype intentionally stays narrow: one shared Raft group, TCP peer RPCs without multiplexing, durable metadata/log persistence, deterministic replicated lease lifecycle semantics, tenant-scoped idempotency and quotas, fencing tokens, and leader-only reads in v1. It still does not implement multi-group sharding, membership changes, or full snapshot/compaction.
 
 ### Build and test
 
