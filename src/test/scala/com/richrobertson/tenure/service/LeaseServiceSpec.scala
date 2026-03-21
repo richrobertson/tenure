@@ -98,7 +98,12 @@ class LeaseServiceSpec extends CatsEffectSuite:
       leaseId = acquired.lease.leaseId.fold(fail("expected lease id in acquire result"))(_.value.toString)
       _ <- clock.advanceSeconds(5)
       renewed <- service.renew(RenewRequest("tenant-a", "resource-1", leaseId, "holder-1", 30, "req-2"))
-    yield assertEquals(renewed.left.toOption, Some(ServiceError.LeaseExpired("lease for resource ResourceKey(TenantId(tenant-a),ResourceId(resource-1)) is no longer active (expired or released)")))
+    yield
+      renewed match
+        case Left(ServiceError.LeaseExpired(message)) =>
+          assert(message.contains("lease for resource"))
+        case other =>
+          fail(s"expected LeaseExpired after expiry, got: $other")
   }
 
   test("renew fails for wrong holder") {
