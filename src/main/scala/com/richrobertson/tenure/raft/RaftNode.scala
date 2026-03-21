@@ -182,6 +182,17 @@ object RaftTransitions:
         val next = base.copy(log = nextLog, commitIndex = cappedCommit, lastApplied = math.max(base.lastApplied, cappedCommit), materialized = materialized)
         next -> AppendEntriesResponse(next.currentTerm, success = true, next.log.lastOption.map(_.index).getOrElse(0L))
 
+  def majorityMatchedIndex(state: RaftRuntimeState, majority: Int): Long =
+    val matchIndexes = state.peerProgress.values.map(_.matchIndex).toList :+ state.log.lastOption.map(_.index).getOrElse(0L)
+    val candidates = matchIndexes.sorted
+    candidates.drop(candidates.size - majority).headOption.getOrElse(0L)
+
+  def commitIndexToAdvance(state: RaftRuntimeState, majority: Int): Option[Long] =
+    val candidate = majorityMatchedIndex(state, majority)
+    if candidate <= state.commitIndex then None
+    else
+      state.log.lift((candidate - 1L).toInt).filter(_.term == state.currentTerm).map(_.index)
+
 trait RaftNode[F[_]]:
   def nodeId: String
   def submit(command: ReplicatedCommand): F[Either[NotLeader, StoredResult]]
@@ -382,8 +393,8 @@ private final class LiveRaftNode[F[_]: Async](
     for
       outcomes <- config.raftPeers.filterNot(_.nodeId == config.nodeId).traverse(peer => replicateToPeer(initialState.currentTerm, peer))
       current <- stateRef.get
-      majorityMatchedIndex = computeCommittedIndex(current)
-      _ <- if majorityMatchedIndex > current.commitIndex then commitThrough(majorityMatchedIndex) else Async[F].unit
+      nextCommitIndex = RaftTransitions.commitIndexToAdvance(current, config.majority)
+      _ <- nextCommitIndex.traverse_(commitThrough)
       now <- Temporal[F].realTime.map(_.toMillis)
       successes = outcomes.count(identity) + 1
       _ <-
@@ -428,10 +439,6 @@ private final class LiveRaftNode[F[_]: Async](
         }
     }
 
-  private def computeCommittedIndex(state: RaftRuntimeState): Long =
-    val matchIndexes = state.peerProgress.values.map(_.matchIndex).toList :+ state.log.lastOption.map(_.index).getOrElse(0L)
-    val candidates = matchIndexes.sorted
-    candidates.drop(candidates.size - config.majority).headOption.getOrElse(0L)
 
   private def commitThrough(index: Long): F[Unit] =
     for
