@@ -17,7 +17,7 @@ Milestone 1 is complete. The repository now includes a runnable single-node Scal
 sbt run
 ```
 
-The server listens on `0.0.0.0:8080`. The no-argument `sbt run` path starts the single-node prototype, while clustered mode still uses `sbt 'run -- <config-path>'`.
+The server listens on `0.0.0.0:8080`. The no-argument `sbt run` path starts the single-node prototype, while clustered mode still uses `sbt "run -- <config-path>"`.
 
 ## Example calls
 
