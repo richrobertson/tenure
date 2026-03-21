@@ -17,7 +17,7 @@ import org.http4s.dsl.Http4sDsl
 final case class AcquireRequestBody(tenantId: String, resourceId: String, holderId: String, ttlSeconds: Long, requestId: String)
 final case class RenewRequestBody(tenantId: String, resourceId: String, leaseId: String, holderId: String, ttlSeconds: Long, requestId: String)
 final case class ReleaseRequestBody(tenantId: String, resourceId: String, leaseId: String, holderId: String, requestId: String)
-final case class ErrorResponse(code: String, message: String)
+final case class ErrorResponse(code: String, message: String, leaderHint: Option[String] = None)
 final case class LeaseResponse(
     tenantId: String,
     resourceId: String,
@@ -32,6 +32,7 @@ final case class AcquireResponse(leaseId: String, expiryTime: String, fencingTok
 final case class RenewResponse(leaseId: String, expiryTime: String, fencingToken: Long, renewed: Boolean)
 final case class ReleaseResponse(leaseId: String, expiryTime: String, fencingToken: Long, released: Boolean)
 final case class GetLeaseResponse(found: Boolean, lease: LeaseResponse)
+final case class ListLeasesResponse(leases: List[LeaseResponse])
 
 object LeaseRoutes:
   given Configuration = Configuration.default.withSnakeCaseMemberNames
@@ -44,6 +45,7 @@ object LeaseRoutes:
   given Codec[RenewResponse] = deriveConfiguredCodec
   given Codec[ReleaseResponse] = deriveConfiguredCodec
   given Codec[GetLeaseResponse] = deriveConfiguredCodec
+  given Codec[ListLeasesResponse] = deriveConfiguredCodec
   given Encoder[LeaseStatus] = Encoder.encodeString.contramap(_.toString.toUpperCase)
   given Decoder[LeaseStatus] = Decoder.decodeString.emap(_ => Left("LeaseStatus decoding is not supported for API requests"))
 
@@ -74,8 +76,15 @@ object LeaseRoutes:
         }
 
       case GET -> Root / "v1" / "leases" / tenantId / resourceId =>
-        service.getLease(TenantId(tenantId), ResourceId(resourceId)).flatMap { result =>
-          Ok(GetLeaseResponse(result.found, toLeaseResponse(result.lease)))
+        service.getLease(TenantId(tenantId), ResourceId(resourceId)).flatMap {
+          case Right(result) => Ok(GetLeaseResponse(result.found, toLeaseResponse(result.lease)))
+          case Left(error)   => errorToHttp(error)
+        }
+
+      case GET -> Root / "v1" / "tenants" / tenantId / "leases" =>
+        service.listLeases(TenantId(tenantId)).flatMap {
+          case Right(result) => Ok(ListLeasesResponse(result.leases.map(toLeaseResponse)))
+          case Left(error)   => errorToHttp(error)
         }
     }
 
@@ -134,6 +143,7 @@ object LeaseRoutes:
       case ServiceError.LeaseExpired(message)   => Conflict(ErrorResponse("LEASE_EXPIRED", message))
       case ServiceError.LeaseMismatch(message)  => Conflict(ErrorResponse("LEASE_MISMATCH", message))
       case ServiceError.NotFound(message)       => NotFound(ErrorResponse("NOT_FOUND", message))
+      case ServiceError.NotLeader(message, leaderHint) => Conflict(ErrorResponse("NOT_LEADER", message, leaderHint))
 
   private def toLeaseResponse(view: LeaseView): LeaseResponse =
     LeaseResponse(

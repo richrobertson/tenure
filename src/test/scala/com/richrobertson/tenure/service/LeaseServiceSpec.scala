@@ -18,8 +18,9 @@ class LeaseServiceSpec extends CatsEffectSuite:
       lease <- service.getLease(TenantId("tenant-a"), ResourceId("resource-1"))
     yield
       assert(acquired.isRight)
-      assertEquals(lease.found, true)
-      assertEquals(lease.lease.status, LeaseStatus.Active)
+      assert(lease.isRight)
+      assertEquals(lease.toOption.map(_.found), Some(true))
+      assertEquals(lease.toOption.map(_.lease.status), Some(LeaseStatus.Active))
   }
 
   test("getLease returns found false with ABSENT lease when nothing exists") {
@@ -28,8 +29,8 @@ class LeaseServiceSpec extends CatsEffectSuite:
       service <- LeaseService.inMemory[IO](clock)
       lease <- service.getLease(TenantId("tenant-a"), ResourceId("resource-1"))
     yield
-      assertEquals(lease.found, false)
-      assertEquals(lease.lease.status, LeaseStatus.Absent)
+      assertEquals(lease.toOption.map(_.found), Some(false))
+      assertEquals(lease.toOption.map(_.lease.status), Some(LeaseStatus.Absent))
   }
 
   test("expiration works with fake clock") {
@@ -72,10 +73,8 @@ class LeaseServiceSpec extends CatsEffectSuite:
       renewed <- service.renew(RenewRequest("tenant-a", "resource-1", leaseId, "holder-2", 15, "req-2"))
     yield
       renewed match
-        case Left(ServiceError.LeaseMismatch(message)) =>
-          assert(message.contains("lease holder or lease id did not match resource"))
-        case other =>
-          fail(s"expected LeaseMismatch for wrong holder, got: $other")
+        case Left(ServiceError.LeaseMismatch(message)) => assert(message.contains("lease holder or lease id did not match resource"))
+        case other                                     => fail(s"expected LeaseMismatch for wrong holder, got: $other")
   }
 
   test("release fails for wrong holder") {
@@ -103,6 +102,16 @@ class LeaseServiceSpec extends CatsEffectSuite:
       service <- LeaseService.inMemory[IO](clock)
       result <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 0, "req-1"))
     yield assertEquals(result.left.toOption, Some(ServiceError.InvalidRequest("ttl_seconds must be positive")))
+  }
+
+  test("listLeases is tenant scoped") {
+    for
+      clock <- TestClock.create[IO](start)
+      service <- LeaseService.inMemory[IO](clock)
+      _ <- service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 15, "req-1"))
+      _ <- service.acquire(AcquireRequest("tenant-b", "resource-1", "holder-2", 15, "req-2"))
+      listed <- service.listLeases(TenantId("tenant-a"))
+    yield assertEquals(listed.toOption.map(_.leases.map(_.tenantId.value)), Some(List("tenant-a")))
   }
 
   private def acquireSuccess(result: Either[ServiceError, AcquireResult]): AcquireResult =

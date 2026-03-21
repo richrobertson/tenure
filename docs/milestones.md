@@ -19,12 +19,12 @@
 - **Demo/test expectation:** Scripted demo showing one tenant, multiple resources, fake-clock expiry and renewal boundary tests, rejection of invalid TTLs, tenant-scoped behavior, and local startup of the single-node HTTP prototype without any clustering or DNS assumption.
 - **Done means:** A single-node service enforces the documented lease contract with deterministic tests, fake-clock time control, no hidden time dependencies, and a runtime model that does not assume Kubernetes or external discovery.
 
-## Milestone 2: embedded Raft integration and replicated lease log *(next)*
+## Milestone 2: embedded Raft integration and replicated lease log *(complete)*
 
-Milestone 2 is the next active milestone. It adds embedded Raft integration, replicated command flow for mutating lease operations, leader handling and redirection, and durable replicated log semantics while keeping the current architecture and API contract intact.
+Milestone 2 is complete in the current prototype. The repo now includes one shared Raft group, replicated mutating lease commands, leader election and `NOT_LEADER` handling, static-config bootstrap, local disk persistence for Raft metadata/log entries, restart replay, and direct TCP peer RPCs without multiplexing.
 
 - **Objective:** Introduce embedded Raft and replicate mutating lease commands through one shared group.
-- **Deliverables:** Single-group Raft integration, command replication path, leader forwarding/redirection behavior, and local durable log persistence.
+- **Deliverables:** Single-group Raft integration, command replication path, explicit follower `NOT_LEADER` behavior for reads and writes, local durable metadata/log persistence, and static-config bootstrap over direct TCP peer endpoints.
 - **Out of scope:** Multi-group placement or rebalancing.
 - **Validation artifact:** Deterministic failover test output plus a replay transcript from persisted Raft state.
 - **Demo/test expectation:** Scripted demo showing leader-mediated mutation, `NOT_LEADER` handling for reads and writes, failover to a new leader, successful replay after restart, static-config bootstrap with explicit node IDs and `IP:port` endpoints, and TCP peer communication without multiplexing.
