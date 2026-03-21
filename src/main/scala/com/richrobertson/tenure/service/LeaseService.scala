@@ -5,6 +5,7 @@ import cats.effect.std.Mutex
 import cats.syntax.all.*
 import com.richrobertson.tenure.auth.{Authorization, Principal}
 import com.richrobertson.tenure.model.*
+import com.richrobertson.tenure.observability.{LogEvent, Observability}
 import com.richrobertson.tenure.quota.{TenantQuotaPolicy, TenantQuotaRegistry}
 import com.richrobertson.tenure.raft.RaftNode
 import com.richrobertson.tenure.statemachine.{LeaseState, LeaseStateMachine}
@@ -195,20 +196,22 @@ object LeaseService:
   def inMemory[F[_]: Async](
       clock: Clock[F],
       quotas: TenantQuotaRegistry = TenantQuotaRegistry.default,
-      authorization: Authorization = Authorization.perTenant
+      authorization: Authorization = Authorization.perTenant,
+      observability: Observability[F] = Observability.noop[F]
   ): F[LeaseService[F]] =
     for
       stateRef <- cats.effect.Ref.of[F, ServiceState](ServiceState.empty)
       mutationLock <- Mutex[F]
-    yield LocalLeaseService[F](stateRef, mutationLock, clock, quotas, authorization)
+    yield LocalLeaseService[F](stateRef, mutationLock, clock, quotas, authorization, observability)
 
   def replicated[F[_]: Async](
       raftNode: RaftNode[F],
       clock: Clock[F],
       quotas: TenantQuotaRegistry = TenantQuotaRegistry.default,
-      authorization: Authorization = Authorization.perTenant
+      authorization: Authorization = Authorization.perTenant,
+      observability: Observability[F] = Observability.noop[F]
   ): LeaseService[F] =
-    ReplicatedLeaseService[F](raftNode, clock, quotas, authorization)
+    ReplicatedLeaseService[F](raftNode, clock, quotas, authorization, observability)
 
 private trait ValidationSupport:
   final case class ValidAcquire(resourceKey: ResourceKey, holderId: ClientId, ttlSeconds: Long, requestContext: RequestContext, fingerprint: RequestFingerprint)
@@ -285,18 +288,50 @@ private trait ValidationSupport:
   protected def parseLeaseId(value: String): Either[String, LeaseId] =
     Either.catchNonFatal(UUID.fromString(value.trim)).leftMap(_ => "lease_id must be a valid UUID").map(LeaseId.apply)
 
+object ServiceObservability:
+  private def errorCode(error: ServiceError): String =
+    error match
+      case _: ServiceError.InvalidRequest => "INVALID_ARGUMENT"
+      case _: ServiceError.Unauthorized => "UNAUTHORIZED"
+      case _: ServiceError.Forbidden => "FORBIDDEN"
+      case _: ServiceError.AlreadyHeld => "ALREADY_HELD"
+      case _: ServiceError.LeaseExpired => "LEASE_EXPIRED"
+      case _: ServiceError.LeaseMismatch => "LEASE_MISMATCH"
+      case _: ServiceError.NotFound => "NOT_FOUND"
+      case _: ServiceError.QuotaExceeded => "QUOTA_EXCEEDED"
+      case _: ServiceError.NotLeader => "NOT_LEADER"
+
+  def recordResult[F[_]: Async](observability: Observability[F], clock: Clock[F], nodeId: String, operation: String, requestContext: Option[RequestContext], result: Either[ServiceError, Unit], dedupe: Boolean = false): F[Unit] =
+    clock.now.flatMap { now =>
+      val labels = Map("node_id" -> nodeId, "operation" -> operation, "result" -> result.fold(_ => "error", _ => "success"))
+      val ctxFields = requestContext.fold(Map.empty[String, String])(ctx => Map("tenant_id" -> ctx.tenantId.value, "resource_id" -> ctx.resourceKey.resourceId.value, "request_id" -> ctx.requestId.value))
+      val base = observability.incrementCounter(if dedupe then "duplicate_requests_total" else "service_requests_total", labels)
+      result match
+        case Right(_) =>
+          base *> observability.log(LogEvent(now.toEpochMilli, "INFO", "lease.request.result", s"$operation completed", nodeId = Some(nodeId), tenantId = requestContext.map(_.tenantId.value), resourceId = requestContext.map(_.resourceKey.resourceId.value), requestId = requestContext.map(_.requestId.value), result = Some(if dedupe then "duplicate_replay" else "success"), fields = ctxFields))
+        case Left(error) =>
+          val code = errorCode(error)
+          val extra = error match
+            case _: ServiceError.NotLeader => observability.incrementCounter("not_leader_responses_total", Map("node_id" -> nodeId, "operation_kind" -> operation))
+            case _: ServiceError.QuotaExceeded => observability.incrementCounter("quota_rejections_total", Map("node_id" -> nodeId, "operation" -> operation))
+            case _: ServiceError.Forbidden | _: ServiceError.Unauthorized => observability.incrementCounter("auth_denials_total", Map("node_id" -> nodeId, "operation" -> operation))
+            case _ => Async[F].unit
+          base *> extra *> observability.log(LogEvent(now.toEpochMilli, "WARN", "lease.request.result", s"$operation failed", nodeId = Some(nodeId), tenantId = requestContext.map(_.tenantId.value), resourceId = requestContext.map(_.resourceKey.resourceId.value), requestId = requestContext.map(_.requestId.value), result = Some(if dedupe then "duplicate_replay" else "error"), errorCode = Some(code), fields = ctxFields))
+      }
+
 private final case class LocalLeaseService[F[_]: Async](
     stateRef: cats.effect.Ref[F, ServiceState],
     mutationLock: Mutex[F],
     clock: Clock[F],
     quotas: TenantQuotaRegistry,
-    authorization: Authorization
+    authorization: Authorization,
+    observability: Observability[F]
 ) extends LeaseService[F]
     with ValidationSupport:
 
   override def acquire(request: AcquireRequest): F[Either[ServiceError, AcquireResult]] =
-    validateAcquire(request, authorization).fold(_.asLeft[AcquireResult].pure[F], valid =>
-      handleWithIdempotency(valid.requestContext, valid.fingerprint)(LeaseMaterializer.replayAcquire) {
+    validateAcquire(request, authorization).fold(err => ServiceObservability.recordResult(observability, clock, "local", "acquire", None, Left(err).map(_ => ())) *> err.asLeft[AcquireResult].pure[F], valid =>
+      handleWithIdempotency(valid.requestContext, valid.fingerprint, "acquire")(LeaseMaterializer.replayAcquire) {
         Async[F].delay(LeaseId.random()).flatMap { nextLeaseId =>
           clock.now.map { now =>
             val command = AcquireCommand(valid.requestContext, valid.holderId, valid.ttlSeconds, nextLeaseId, quotas.policyFor(valid.requestContext.tenantId), now)
@@ -304,57 +339,57 @@ private final case class LocalLeaseService[F[_]: Async](
               val next = LeaseMaterializer.applyCommand(current, command)
               next -> LeaseMaterializer.replayAcquire(next.responses((valid.requestContext.tenantId, valid.requestContext.requestId)).result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))
             }
-          }.flatten
+          }.flatten.flatTap(result => ServiceObservability.recordResult(observability, clock, "local", "acquire", Some(valid.requestContext), result.map(_ => ())))
         }
       }
     )
 
   override def renew(request: RenewRequest): F[Either[ServiceError, RenewResult]] =
-    validateRenew(request, authorization).fold(_.asLeft[RenewResult].pure[F], valid =>
-      handleWithIdempotency(valid.requestContext, valid.fingerprint)(LeaseMaterializer.replayRenew) {
+    validateRenew(request, authorization).fold(err => ServiceObservability.recordResult(observability, clock, "local", "renew", None, Left(err).map(_ => ())) *> err.asLeft[RenewResult].pure[F], valid =>
+      handleWithIdempotency(valid.requestContext, valid.fingerprint, "renew")(LeaseMaterializer.replayRenew) {
         clock.now.map { now =>
           val command = RenewCommand(valid.requestContext, valid.leaseId, valid.holderId, valid.ttlSeconds, quotas.policyFor(valid.requestContext.tenantId), now)
           stateRef.modify { current =>
             val next = LeaseMaterializer.applyCommand(current, command)
             next -> LeaseMaterializer.replayRenew(next.responses((valid.requestContext.tenantId, valid.requestContext.requestId)).result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))
           }
-        }.flatten
+        }.flatten.flatTap(result => ServiceObservability.recordResult(observability, clock, "local", "renew", Some(valid.requestContext), result.map(_ => ())))
       }
     )
 
   override def release(request: ReleaseRequest): F[Either[ServiceError, ReleaseResult]] =
-    validateRelease(request, authorization).fold(_.asLeft[ReleaseResult].pure[F], valid =>
-      handleWithIdempotency(valid.requestContext, valid.fingerprint)(LeaseMaterializer.replayRelease) {
+    validateRelease(request, authorization).fold(err => ServiceObservability.recordResult(observability, clock, "local", "release", None, Left(err).map(_ => ())) *> err.asLeft[ReleaseResult].pure[F], valid =>
+      handleWithIdempotency(valid.requestContext, valid.fingerprint, "release")(LeaseMaterializer.replayRelease) {
         clock.now.map { now =>
           val command = ReleaseCommand(valid.requestContext, valid.leaseId, valid.holderId, now)
           stateRef.modify { current =>
             val next = LeaseMaterializer.applyCommand(current, command)
             next -> LeaseMaterializer.replayRelease(next.responses((valid.requestContext.tenantId, valid.requestContext.requestId)).result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))
           }
-        }.flatten
+        }.flatten.flatTap(result => ServiceObservability.recordResult(observability, clock, "local", "release", Some(valid.requestContext), result.map(_ => ())))
       }
     )
 
   override def getLease(request: GetLeaseRequest): F[Either[ServiceError, GetLeaseResult]] =
-    validateRead(request, authorization).fold(_.asLeft[GetLeaseResult].pure[F], valid =>
+    validateRead(request, authorization).fold(err => ServiceObservability.recordResult(observability, clock, "local", "get", None, Left(err).map(_ => ())) *> err.asLeft[GetLeaseResult].pure[F], valid =>
       clock.now.flatMap { now =>
         stateRef.get.map { current =>
           val lease = current.leaseState.viewAt(valid.resourceKey, now)
           Right(GetLeaseResult(found = lease.status != LeaseStatus.Absent, lease = lease))
         }
-      }
+      }.flatTap(result => ServiceObservability.recordResult(observability, clock, "local", "get", Some(RequestContext(valid.tenantId, RequestId("get-local"), valid.resourceKey)), result.map(_ => ())))
     )
 
   override def listLeases(request: ListLeasesRequest): F[Either[ServiceError, ListLeasesResult]] =
-    validateList(request, authorization).fold(_.asLeft[ListLeasesResult].pure[F], tenantId =>
+    validateList(request, authorization).fold(err => ServiceObservability.recordResult(observability, clock, "local", "list", None, Left(err).map(_ => ())) *> err.asLeft[ListLeasesResult].pure[F], tenantId =>
       clock.now.flatMap { now =>
         stateRef.get.map { current =>
           Right(ListLeasesResult(current.leaseState.tenantViewsAt(tenantId, now)))
         }
-      }
+      }.flatTap(result => ServiceObservability.recordResult(observability, clock, "local", "list", Some(RequestContext(tenantId, RequestId("list-local"), ResourceKey(tenantId, ResourceId("tenant-scope")))), result.map(_ => ())))
     )
 
-  private def handleWithIdempotency[A](requestContext: RequestContext, fingerprint: RequestFingerprint)(
+  private def handleWithIdempotency[A](requestContext: RequestContext, fingerprint: RequestFingerprint, operation: String)(
       replay: StoredResult => Option[Either[ServiceError, A]]
   )(
       compute: F[Either[ServiceError, A]]
@@ -363,50 +398,52 @@ private final case class LocalLeaseService[F[_]: Async](
       stateRef.get.flatMap { current =>
         current.responses.get((requestContext.tenantId, requestContext.requestId)) match
           case Some(stored) if stored.fingerprint == fingerprint =>
-            replay(stored.result).getOrElse(ServiceError.InvalidRequest("stored request replay type did not match operation").asLeft[A]).pure[F]
+            val replayed = replay(stored.result).getOrElse(ServiceError.InvalidRequest("stored request replay type did not match operation").asLeft[A])
+            ServiceObservability.recordResult(observability, clock, "local", operation, Some(requestContext), replayed.map(_ => ()), dedupe = true) *> replayed.pure[F]
           case Some(_) =>
-            ServiceError.InvalidRequest("request_id cannot be reused for a different operation, resource, or parameters").asLeft[A].pure[F]
+            val error = ServiceError.InvalidRequest("request_id cannot be reused for a different operation, resource, or parameters")
+            ServiceObservability.recordResult(observability, clock, "local", operation, Some(requestContext), Left(error).map(_ => ())) *> error.asLeft[A].pure[F]
           case None => compute
       }
     }
 
-private final case class ReplicatedLeaseService[F[_]: Async](raftNode: RaftNode[F], clock: Clock[F], quotas: TenantQuotaRegistry, authorization: Authorization)
+private final case class ReplicatedLeaseService[F[_]: Async](raftNode: RaftNode[F], clock: Clock[F], quotas: TenantQuotaRegistry, authorization: Authorization, observability: Observability[F])
     extends LeaseService[F]
     with ValidationSupport:
   override def acquire(request: AcquireRequest): F[Either[ServiceError, AcquireResult]] =
-    validateAcquire(request, authorization).fold(_.asLeft[AcquireResult].pure[F], valid =>
+    validateAcquire(request, authorization).fold(err => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "acquire", None, Left(err).map(_ => ())) *> err.asLeft[AcquireResult].pure[F], valid =>
       clock.now.flatMap(now =>
         Async[F].delay(LeaseId.random()).flatMap { nextLeaseId =>
           raftNode.submit(AcquireCommand(valid.requestContext, valid.holderId, valid.ttlSeconds, nextLeaseId, quotas.policyFor(valid.requestContext.tenantId), now)).map {
             case Left(notLeader) => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not the leader", notLeader.leaderHint))
             case Right(stored) => LeaseMaterializer.replayAcquire(stored).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))
-          }
+          }.flatTap(result => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "acquire", Some(valid.requestContext), result.map(_ => ())))
         }
       )
     )
 
   override def renew(request: RenewRequest): F[Either[ServiceError, RenewResult]] =
-    validateRenew(request, authorization).fold(_.asLeft[RenewResult].pure[F], valid =>
+    validateRenew(request, authorization).fold(err => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "renew", None, Left(err).map(_ => ())) *> err.asLeft[RenewResult].pure[F], valid =>
       clock.now.flatMap(now =>
         raftNode.submit(RenewCommand(valid.requestContext, valid.leaseId, valid.holderId, valid.ttlSeconds, quotas.policyFor(valid.requestContext.tenantId), now)).map {
           case Left(notLeader) => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not the leader", notLeader.leaderHint))
           case Right(stored) => LeaseMaterializer.replayRenew(stored).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))
-        }
+        }.flatTap(result => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "renew", Some(valid.requestContext), result.map(_ => ())))
       )
     )
 
   override def release(request: ReleaseRequest): F[Either[ServiceError, ReleaseResult]] =
-    validateRelease(request, authorization).fold(_.asLeft[ReleaseResult].pure[F], valid =>
+    validateRelease(request, authorization).fold(err => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "release", None, Left(err).map(_ => ())) *> err.asLeft[ReleaseResult].pure[F], valid =>
       clock.now.flatMap(now =>
         raftNode.submit(ReleaseCommand(valid.requestContext, valid.leaseId, valid.holderId, now)).map {
           case Left(notLeader) => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not the leader", notLeader.leaderHint))
           case Right(stored) => LeaseMaterializer.replayRelease(stored).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))
-        }
+        }.flatTap(result => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "release", Some(valid.requestContext), result.map(_ => ())))
       )
     )
 
   override def getLease(request: GetLeaseRequest): F[Either[ServiceError, GetLeaseResult]] =
-    validateRead(request, authorization).fold(_.asLeft[GetLeaseResult].pure[F], valid =>
+    validateRead(request, authorization).fold(err => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "get", None, Left(err).map(_ => ())) *> err.asLeft[GetLeaseResult].pure[F], valid =>
       raftNode.canServeLeaderReads.flatMap { authoritative =>
         if authoritative then
           clock.now.flatMap { now =>
@@ -414,20 +451,20 @@ private final case class ReplicatedLeaseService[F[_]: Async](raftNode: RaftNode[
               val lease = current.leaseState.viewAt(valid.resourceKey, now)
               Right(GetLeaseResult(found = lease.status != LeaseStatus.Absent, lease = lease))
             }
-          }
-        else raftNode.leaderHint.map(hint => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not authoritative for reads", hint)))
+          }.flatTap(result => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "get", Some(RequestContext(valid.tenantId, RequestId("get-read"), valid.resourceKey)), result.map(_ => ())))
+        else raftNode.leaderHint.map(hint => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not authoritative for reads", hint))).flatTap(result => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "get", Some(RequestContext(valid.tenantId, RequestId("read-no-request-id"), valid.resourceKey)), result.map(_ => ())))
       }
     )
 
   override def listLeases(request: ListLeasesRequest): F[Either[ServiceError, ListLeasesResult]] =
-    validateList(request, authorization).fold(_.asLeft[ListLeasesResult].pure[F], tenantId =>
+    validateList(request, authorization).fold(err => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "list", None, Left(err).map(_ => ())) *> err.asLeft[ListLeasesResult].pure[F], tenantId =>
       raftNode.canServeLeaderReads.flatMap { authoritative =>
         if authoritative then
           clock.now.flatMap { now =>
             raftNode.readState.map { current =>
               Right(ListLeasesResult(current.leaseState.tenantViewsAt(tenantId, now)))
             }
-          }
-        else raftNode.leaderHint.map(hint => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not authoritative for reads", hint)))
+          }.flatTap(result => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "list", Some(RequestContext(tenantId, RequestId("list-read"), ResourceKey(tenantId, ResourceId("tenant-scope")))), result.map(_ => ())))
+        else raftNode.leaderHint.map(hint => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not authoritative for reads", hint))).flatTap(result => ServiceObservability.recordResult(observability, clock, raftNode.nodeId, "list", Some(RequestContext(tenantId, RequestId("list-no-request-id"), ResourceKey(tenantId, ResourceId("tenant-scope")))), result.map(_ => ())))
       }
     )

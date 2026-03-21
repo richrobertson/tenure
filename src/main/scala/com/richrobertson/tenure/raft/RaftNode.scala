@@ -4,6 +4,7 @@ import cats.effect.kernel.{Async, Resource, Temporal}
 import cats.effect.std.Mutex
 import cats.effect.{Fiber, Ref}
 import cats.syntax.all.*
+import com.richrobertson.tenure.observability.{LogEvent, Observability}
 import com.richrobertson.tenure.persistence.{RaftPersistence, RecoveryBootstrap}
 import com.richrobertson.tenure.quota.TenantQuotaRegistry
 import com.richrobertson.tenure.service.*
@@ -174,14 +175,15 @@ trait RaftNode[F[_]]:
   def readState: F[ServiceState]
   def canServeLeaderReads: F[Boolean]
   def shutdown: F[Unit]
+  def currentTermValue: F[Long]
 
 object RaftNode:
-  def resource[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F], quotas: TenantQuotaRegistry = TenantQuotaRegistry.default): Resource[F, RaftNode[F]] =
-    Resource.make(create(config, persistence, quotas))(_.shutdown).widen
+  def resource[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F], quotas: TenantQuotaRegistry = TenantQuotaRegistry.default, observability: Observability[F] = Observability.noop[F]): Resource[F, RaftNode[F]] =
+    Resource.make(create(config, persistence, quotas, observability))(_.shutdown).widen
 
-  private def create[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F], quotas: TenantQuotaRegistry): F[LiveRaftNode[F]] =
+  private def create[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F], quotas: TenantQuotaRegistry, observability: Observability[F]): F[LiveRaftNode[F]] =
     for
-      recovered <- RecoveryBootstrap.recover(persistence)
+      recovered <- RecoveryBootstrap.recover(persistence, config.nodeId, observability, Temporal[F].realTime.map(_.toMillis))
       nowMillis <- Temporal[F].realTime.map(_.toMillis)
       stateRef <- Ref.of[F, RaftRuntimeState](
         RaftRuntimeState(
@@ -202,7 +204,7 @@ object RaftNode:
       mutex <- Mutex[F]
       serverRef <- Ref.of[F, Option[ServerSocket]](None)
       fibersRef <- Ref.of[F, List[Fiber[F, Throwable, Unit]]](Nil)
-      node = new LiveRaftNode[F](config, persistence, stateRef, mutex, serverRef, fibersRef, quotas)
+      node = new LiveRaftNode[F](config, persistence, stateRef, mutex, serverRef, fibersRef, quotas, observability)
       _ <- node.start
     yield node
 
@@ -213,7 +215,8 @@ private final class LiveRaftNode[F[_]: Async](
     mutex: Mutex[F],
     serverRef: Ref[F, Option[ServerSocket]],
     fibersRef: Ref[F, List[Fiber[F, Throwable, Unit]]],
-    quotas: TenantQuotaRegistry
+    quotas: TenantQuotaRegistry,
+    observability: Observability[F]
 ) extends RaftNode[F]:
   override val nodeId: String = config.nodeId
 
@@ -226,6 +229,9 @@ private final class LiveRaftNode[F[_]: Async](
 
   def start: F[Unit] =
     for
+      now <- nowMillis
+      _ <- observability.log(LogEvent(now, "INFO", "node.start", "starting raft node", nodeId = Some(nodeId)))
+      _ <- setRoleGauge(NodeRole.Follower)
       serverFiber <- Async[F].start(serverLoop)
       electionFiber <- Async[F].start(electionLoop)
       heartbeatFiber <- Async[F].start(heartbeatLoop)
@@ -234,6 +240,8 @@ private final class LiveRaftNode[F[_]: Async](
 
   override def shutdown: F[Unit] =
     for
+      now <- nowMillis
+      _ <- observability.log(LogEvent(now, "INFO", "node.shutdown", "shutting down raft node", nodeId = Some(nodeId)))
       server <- serverRef.get
       _ <- server.traverse_(socket => Async[F].blocking(socket.close()).handleError(_ => ()))
       fibers <- fibersRef.get
@@ -243,17 +251,22 @@ private final class LiveRaftNode[F[_]: Async](
   override def submit(command: ReplicatedCommand): F[Either[NotLeader, StoredResult]] =
     mutex.lock.surround {
       assertLeaderAuthority.flatMap {
-        case Left(notLeader) => notLeader.asLeft[StoredResult].pure[F]
+        case Left(notLeader) => logNotLeader("write", None, None, None) *> notLeader.asLeft[StoredResult].pure[F]
         case Right(leaderState) =>
           val entry = RaftLogEntry(lastLogIndex(leaderState) + 1L, leaderState.currentTerm, command)
           for
+            started <- nowMillis
             _ <- persistence.appendEntry(entry)
             _ <- stateRef.update(current => current.copy(log = current.log :+ entry))
             updated <- stateRef.get
             replication <- replicateToQuorum(updated)
             result <-
-              if replication.authoritative then readCommittedResult(command.requestContext)
-              else stepDown(updated.currentTerm, None) *> NotLeader(updated.leaderId.flatMap(config.leaderHintEndpoint)).asLeft[StoredResult].pure[F]
+              if replication.authoritative then
+                readCommittedResult(command.requestContext).flatTap {
+                  case Right(_) => recordCommit(command, started, "committed", None)
+                  case Left(_)  => recordCommit(command, started, "lost_authority", Some("NOT_LEADER"))
+                }
+              else stepDown(updated.currentTerm, None) *> recordCommit(command, started, "lost_authority", Some("NOT_LEADER")) *> NotLeader(updated.leaderId.flatMap(config.leaderHintEndpoint)).asLeft[StoredResult].pure[F]
           yield result
       }
     }
@@ -261,6 +274,7 @@ private final class LiveRaftNode[F[_]: Async](
   override def role: F[NodeRole] = stateRef.get.map(_.role)
   override def leaderHint: F[Option[String]] = stateRef.get.map(_.leaderId.flatMap(config.leaderHintEndpoint))
   override def readState: F[ServiceState] = stateRef.get.map(_.materialized)
+  override def currentTermValue: F[Long] = stateRef.get.map(_.currentTerm)
 
   override def canServeLeaderReads: F[Boolean] =
     stateRef.get.flatMap(canServeLeaderReadsFromState)
@@ -331,6 +345,7 @@ private final class LiveRaftNode[F[_]: Async](
           )
           next -> next
         }
+        _ <- observability.incrementCounter("election_events_total", Map("node_id" -> nodeId, "result" -> "started")) *> observability.log(LogEvent(now, "INFO", "election.started", "starting election", nodeId = Some(nodeId), term = Some(candidate.currentTerm)))
         _ <- persistMetadata(candidate)
         lastIndex = lastLogIndex(candidate)
         lastTerm = termAt(candidate, lastIndex).getOrElse(0L)
@@ -349,7 +364,7 @@ private final class LiveRaftNode[F[_]: Async](
     }
 
   private def becomeLeader(nowMillis: Long): F[Unit] =
-    stateRef.update { state =>
+    stateRef.updateAndGet { state =>
       val nextLogIndex = lastLogIndex(state)
       val progress = config.raftPeers.filterNot(_.nodeId == config.nodeId).map { peer =>
         peer.nodeId -> PeerProgress(nextIndex = nextLogIndex + 1L, matchIndex = state.snapshot.map(_.lastIncludedIndex).getOrElse(0L))
@@ -360,6 +375,11 @@ private final class LiveRaftNode[F[_]: Async](
         lastQuorumAckMillis = nowMillis,
         peerProgress = progress
       )
+    }.flatTap { state =>
+      observability.incrementCounter("leadership_transitions_total", Map("node_id" -> nodeId, "role" -> "leader")) *>
+      observability.incrementCounter("leader_changes_total", Map("node_id" -> nodeId)) *>
+      setRoleGauge(NodeRole.Leader) *>
+      observability.log(LogEvent(nowMillis, "INFO", "role.transition", "node became leader", nodeId = Some(nodeId), term = Some(state.currentTerm), leaderId = Some(nodeId), result = Some("leader")))
     }
 
   private final case class ReplicationOutcome(authoritative: Boolean, quorumAcknowledged: Boolean)
@@ -481,6 +501,7 @@ private final class LiveRaftNode[F[_]: Async](
   private def stepDown(term: Long, leaderId: Option[String]): F[Unit] =
     for
       now <- Temporal[F].realTime.map(_.toMillis)
+      prior <- stateRef.get
       _ <- stateRef.update { state =>
         state.copy(
           currentTerm = term,
@@ -494,6 +515,8 @@ private final class LiveRaftNode[F[_]: Async](
       }
       current <- stateRef.get
       _ <- persistMetadata(current)
+      _ <- observability.incrementCounter("leadership_transitions_total", Map("node_id" -> nodeId, "role" -> "follower")) *> setRoleGauge(NodeRole.Follower)
+      _ <- observability.log(LogEvent(now, "WARN", "role.transition", "node stepped down", nodeId = Some(nodeId), term = Some(term), leaderId = leaderId.orElse(current.leaderId), result = Some("follower"), fields = Map("prior_role" -> prior.role.toString)))
     yield ()
 
   private def send(peer: PeerNode, message: PeerMessage): F[PeerMessage] =
@@ -512,6 +535,27 @@ private final class LiveRaftNode[F[_]: Async](
         }.flatMap(line => Async[F].fromEither(decode[PeerMessage](line)))
       }
     )(socket => Async[F].blocking(socket.close()).handleError(_ => ()))
+
+
+  private def nowMillis: F[Long] = Temporal[F].realTime.map(_.toMillis)
+
+  private def setRoleGauge(role: NodeRole): F[Unit] =
+    observability.setGauge("node_role", if role == NodeRole.Leader then 1L else 0L, Map("node_id" -> nodeId, "role" -> role.toString.toLowerCase))
+
+  private def logNotLeader(kind: String, tenantId: Option[String], resourceId: Option[String], requestId: Option[String]): F[Unit] =
+    nowMillis.flatMap(ts => observability.incrementCounter("not_leader_responses_total", Map("node_id" -> nodeId, "operation_kind" -> kind)) *> observability.log(LogEvent(ts, "WARN", "request.not_leader", s"rejected $kind request because node is not leader", nodeId = Some(nodeId), leaderId = None, tenantId = tenantId, resourceId = resourceId, requestId = requestId, errorCode = Some("NOT_LEADER"))))
+
+  private def recordCommit(command: ReplicatedCommand, startedMillis: Long, result: String, errorCode: Option[String]): F[Unit] =
+    nowMillis.flatMap { finished =>
+      val ctx = command.requestContext
+      val op = command match
+        case _: AcquireCommand => "acquire"
+        case _: RenewCommand => "renew"
+        case _: ReleaseCommand => "release"
+      observability.incrementCounter("mutating_operations_total", Map("node_id" -> nodeId, "operation" -> op, "result" -> result)) *>
+      observability.recordTiming("commit_latency_ms", finished - startedMillis, Map("node_id" -> nodeId, "operation" -> op)) *>
+      observability.log(LogEvent(finished, if errorCode.isDefined then "WARN" else "INFO", "command.result", s"$op command completed", nodeId = Some(nodeId), tenantId = Some(ctx.tenantId.value), resourceId = Some(ctx.resourceKey.resourceId.value), requestId = Some(ctx.requestId.value), term = None, result = Some(result), errorCode = errorCode))
+    }
 
   private def randomElectionTimeout: F[FiniteDuration] =
     Temporal[F].realTime.map(_.toMillis).map { now =>
@@ -537,9 +581,12 @@ private final class LiveRaftNode[F[_]: Async](
         serviceState = state.materialized
       )
       for
+        ts <- nowMillis
         _ <- persistence.saveSnapshot(snapshot)
         updated <- stateRef.updateAndGet(_.copy(snapshot = Some(snapshot)))
         _ <- persistMetadata(updated)
+        _ <- observability.incrementCounter("snapshot_events_total", Map("node_id" -> nodeId, "event" -> "saved"))
+        _ <- observability.log(LogEvent(ts, "INFO", "snapshot.saved", "saved local snapshot", nodeId = Some(nodeId), term = Some(state.currentTerm), fields = Map("last_included_index" -> snapshot.lastIncludedIndex.toString)))
       yield ()
 
   private def lastLogIndex(state: RaftRuntimeState): Long =

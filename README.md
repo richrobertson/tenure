@@ -72,6 +72,7 @@ Milestone 5 is now complete. The repo now contains explicit local-disk recovery 
 - [Milestone 3 lifecycle demo](docs/demo/milestone-3.md)
 - [Milestone 4 quotas/idempotency/fencing demo](docs/demo/milestone-4.md)
 - [Milestone 5 persistence/recovery demo](docs/demo/milestone-5.md)
+- [Milestone 6 observability/failure-injection demo](docs/demo/milestone-6.md)
 
 ## Why leases are different from simple distributed locks
 
@@ -83,7 +84,7 @@ Tenure is intentionally scoped at the point where distributed-systems correctnes
 
 ## Future work
 
-Milestone 5 is now complete. Milestone 6 still needs observability and deliberate failure-injection coverage beyond the recovery/snapshot mechanics added here.
+Milestone 6 is now complete. The repo now includes a local observability surface, structured event logs, request-correlation fields, and deterministic failure-injection validation for leader loss, persistence-path delays, retries, recovery, quota/auth denials, and local stale-writer validation artifacts.
 
 ## Local prototype
 

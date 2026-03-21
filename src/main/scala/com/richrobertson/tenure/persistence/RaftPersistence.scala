@@ -1,8 +1,11 @@
 package com.richrobertson.tenure.persistence
 
 import cats.effect.Sync
+import cats.effect.kernel.Temporal
 import cats.syntax.all.*
+import com.richrobertson.tenure.observability.Observability
 import com.richrobertson.tenure.raft.{PersistedMetadata, PersistedNodeState, PersistedSnapshot, RaftLogEntry}
+import com.richrobertson.tenure.testkit.{FailureInjector, FailurePoint}
 import com.richrobertson.tenure.service.ServiceState
 import io.circe.Codec
 import io.circe.parser.decode
@@ -19,14 +22,19 @@ trait RaftPersistence[F[_]]:
   def saveSnapshot(snapshot: PersistedSnapshot): F[Unit]
 
 object RaftPersistence:
-  def fileBacked[F[_]: Sync](dataDir: String)(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]): F[RaftPersistence[F]] =
+  def fileBacked[F[_]: Temporal](
+      dataDir: String,
+      nodeId: String = "local",
+      failureInjector: FailureInjector[F] = FailureInjector.noop[F],
+      observability: Observability[F] = Observability.noop[F]
+  )(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]): F[RaftPersistence[F]] =
     Sync[F].delay {
       val root = Paths.get(dataDir)
       Files.createDirectories(root)
-      new FileBackedRaftPersistence[F](root)
+      new FileBackedRaftPersistence[F](root, nodeId, failureInjector, observability)
     }
 
-private final class FileBackedRaftPersistence[F[_]: Sync](root: Path)(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]) extends RaftPersistence[F]:
+private final class FileBackedRaftPersistence[F[_]: Temporal](root: Path, nodeId: String, failureInjector: FailureInjector[F], observability: Observability[F])(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]) extends RaftPersistence[F]:
   private val metadataPath = root.resolve("metadata.json")
   private val logPath = root.resolve("log.jsonl")
   private val snapshotPath = root.resolve("snapshot.json")
@@ -40,10 +48,10 @@ private final class FileBackedRaftPersistence[F[_]: Sync](root: Path)(using Code
     yield PersistedNodeState(metadata, snapshot, entries)
 
   override def saveMetadata(metadata: PersistedMetadata): F[Unit] =
-    writeString(metadataPath, metadata.asJson.spaces2)
+    delay(FailurePoint.PersistenceMetadataSave) *> writeString(metadataPath, metadata.asJson.spaces2)
 
   override def appendEntry(entry: RaftLogEntry): F[Unit] =
-    Sync[F].blocking {
+    delay(FailurePoint.PersistenceAppend) *> Sync[F].blocking {
       Files.writeString(
         logPath,
         entry.asJson.noSpaces + "\n",
@@ -55,7 +63,7 @@ private final class FileBackedRaftPersistence[F[_]: Sync](root: Path)(using Code
     }
 
   override def overwriteEntries(entries: Vector[RaftLogEntry]): F[Unit] =
-    writeString(logPath, entries.map(_.asJson.noSpaces).mkString("", "\n", if entries.isEmpty then "" else "\n"))
+    delay(FailurePoint.PersistenceOverwrite) *> writeString(logPath, entries.map(_.asJson.noSpaces).mkString("", "\n", if entries.isEmpty then "" else "\n"))
 
   override def loadSnapshot: F[Option[PersistedSnapshot]] =
     for
@@ -64,7 +72,7 @@ private final class FileBackedRaftPersistence[F[_]: Sync](root: Path)(using Code
     yield snapshot
 
   override def saveSnapshot(snapshot: PersistedSnapshot): F[Unit] =
-    writeString(snapshotPath, snapshot.asJson.spaces2)
+    delay(FailurePoint.PersistenceSnapshotSave) *> writeString(snapshotPath, snapshot.asJson.spaces2)
 
   private def ensureFiles: F[Unit] =
     Sync[F].blocking {
@@ -96,3 +104,5 @@ private final class FileBackedRaftPersistence[F[_]: Sync](root: Path)(using Code
       Files.writeString(path, value, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)
       ()
     }
+
+  private def delay(point: FailurePoint): F[Unit] = failureInjector.inject(point, nodeId)
