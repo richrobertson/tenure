@@ -24,11 +24,14 @@ class RaftIntegrationSpec extends CatsEffectSuite:
         _ <- leader.acquire(AcquireRequest("tenant-a", "resource-2", "holder-2", 30, "req-2"))
         _ <- leader.acquire(AcquireRequest("tenant-a", "resource-3", "holder-3", 30, "req-3"))
         _ <- lagging.start
-        _ <- cluster.awaitLeaseVisible(lagging, TenantId("tenant-a"), ResourceId("resource-3"))
-        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-4", "holder-4", 30, "req-4"))
-        _ <- cluster.awaitLeaseVisible(lagging, TenantId("tenant-a"), ResourceId("resource-4"))
-        check <- lagging.getLease(TenantId("tenant-a"), ResourceId("resource-4"))
-      yield assertEquals(check.toOption.map(_.found), Some(true))
+        currentLeader <- cluster.awaitLeader
+        _ <- currentLeader.acquire(AcquireRequest("tenant-a", "resource-4", "holder-4", 30, "req-4"))
+        _ <- cluster.awaitLeaseReplicated(lagging, TenantId("tenant-a"), ResourceId("resource-4"))
+        backfilled <- lagging.hasReplicatedLease(TenantId("tenant-a"), ResourceId("resource-3"))
+        replicated <- lagging.hasReplicatedLease(TenantId("tenant-a"), ResourceId("resource-4"))
+      yield
+        assertEquals(backfilled, true)
+        assertEquals(replicated, true)
     }
   }
 
@@ -72,11 +75,12 @@ class RaftIntegrationSpec extends CatsEffectSuite:
         leader <- cluster.awaitLeader
         target = cluster.otherThan(leader.id).head
         _ <- leader.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 30, "req-1"))
-        _ <- cluster.awaitLeaseVisible(target, TenantId("tenant-a"), ResourceId("resource-1"))
+        _ <- cluster.awaitLeaseReplicated(target, TenantId("tenant-a"), ResourceId("resource-1"))
         _ <- target.stop
         _ <- target.start
-        lease <- cluster.awaitLeaseVisible(target, TenantId("tenant-a"), ResourceId("resource-1"))
-      yield assertEquals(lease.found, true)
+        _ <- cluster.awaitLeaseReplicated(target, TenantId("tenant-a"), ResourceId("resource-1"))
+        replicated <- target.hasReplicatedLease(TenantId("tenant-a"), ResourceId("resource-1"))
+      yield assertEquals(replicated, true)
     }
   }
 
@@ -93,6 +97,7 @@ class RaftIntegrationSpec extends CatsEffectSuite:
       node1 <- TestNode.resource(ClusterConfig("node-1", "127.0.0.1", apiPorts(0), peers, root.resolve("node-1").toString))
       node2 <- TestNode.resource(ClusterConfig("node-2", "127.0.0.1", apiPorts(1), peers, root.resolve("node-2").toString))
       node3 <- TestNode.resource(ClusterConfig("node-3", "127.0.0.1", apiPorts(2), peers, root.resolve("node-3").toString))
+      _ <- Resource.eval(IO.sleep(1200.millis))
     yield TestCluster(List(node1, node2, node3))
 
 
@@ -109,19 +114,13 @@ class RaftIntegrationSpec extends CatsEffectSuite:
     def awaitLeader: IO[TestNode] =
       poll(nodes.findM(_.role.map(_ == NodeRole.Leader)))
 
-    def awaitLeaseVisible(node: TestNode, tenantId: TenantId, resourceId: ResourceId): IO[GetLeaseResult] =
-      pollResult(node.getLease(tenantId, resourceId).map(_.toOption.filter(_.found)))
+    def awaitLeaseReplicated(node: TestNode, tenantId: TenantId, resourceId: ResourceId): IO[Unit] =
+      poll(node.hasReplicatedLease(tenantId, resourceId).map(found => Option.when(found)(())) )
 
-    private def poll(value: IO[Option[TestNode]]): IO[TestNode] =
-      value.flatMap {
-        case Some(node) => IO.pure(node)
-        case None       => IO.sleep(200.millis) *> poll(value)
-      }
-
-    private def pollResult[A](value: IO[Option[A]]): IO[A] =
+    private def poll[A](value: IO[Option[A]]): IO[A] =
       value.flatMap {
         case Some(result) => IO.pure(result)
-        case None         => IO.sleep(200.millis) *> pollResult(value)
+        case None         => IO.sleep(200.millis) *> poll(value)
       }
 
   private object TestNode:
@@ -153,5 +152,9 @@ class RaftIntegrationSpec extends CatsEffectSuite:
 
     def service: IO[LeaseService[IO]] = currentRef.get.flatMap(_.map(_._1).liftTo[IO](new IllegalStateException(s"node $id is stopped")))
     def role: IO[NodeRole] = currentRef.get.flatMap(_.map(_._2.role).getOrElse(IO.pure(NodeRole.Follower)))
+    def hasReplicatedLease(tenantId: TenantId, resourceId: ResourceId): IO[Boolean] =
+      currentRef.get.flatMap(_.map(_._2.readState).liftTo[IO](new IllegalStateException(s"node $id is stopped"))).flatten.map { state =>
+        state.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, resourceId)).isDefined
+      }
     def acquire(request: AcquireRequest): IO[Either[ServiceError, AcquireResult]] = service.flatMap(_.acquire(request))
     def getLease(tenantId: TenantId, resourceId: ResourceId): IO[Either[ServiceError, GetLeaseResult]] = service.flatMap(_.getLease(tenantId, resourceId))

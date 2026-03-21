@@ -412,6 +412,7 @@ private final class LiveRaftNode[F[_]: Async](
       current <- stateRef.get
       nextCommitIndex = RaftTransitions.eligibleCommitIndexForCurrentTerm(current, config.majority)
       _ <- nextCommitIndex.traverse_(commitThrough)
+      _ <- nextCommitIndex.traverse_(_ => config.raftPeers.filterNot(_.nodeId == config.nodeId).traverse_(peer => replicateToPeer(initialState.currentTerm, peer).void))
       now <- Temporal[F].realTime.map(_.toMillis)
       successes = outcomes.count(identity) + 1
       _ <-
@@ -542,5 +543,8 @@ private final class LiveRaftNode[F[_]: Async](
   private def randomElectionTimeout: F[FiniteDuration] =
     Temporal[F].realTime.map(_.toMillis).map { now =>
       val spread = electionMax.toMillis - electionMin.toMillis
-      (electionMin.toMillis + (now % (spread + 1L))).millis
+      val nodeOffset = config.raftPeers.indexWhere(_.nodeId == config.nodeId) match
+        case -1 => 0L
+        case idx => math.min(spread, idx.toLong * 83L)
+      (electionMin.toMillis + ((now + nodeOffset) % (spread + 1L))).millis
     }
