@@ -52,7 +52,7 @@ Inter-node Raft communication uses statically configured TCP peer endpoints in v
 
 Architecture and planning work from Milestone 0 are complete, and Milestone 1 is now complete with a runnable single-node prototype. The repository now combines the documentation-first design scaffold with a local Scala 3 service that exposes acquire, renew, release, and get over HTTP, backed by an in-memory lease state machine and deterministic clock-driven tests.
 
-The current prototype is intentionally single-node, in-memory, non-replicated, and non-durable. Cluster formation, embedded Raft replication, replicated log semantics, and durable persistence remain for Milestone 2 and later milestones.
+Milestone 2 is complete. The repo now contains a single-group Raft integration path with static-config bootstrap, replicated mutating commands, follower `NOT_LEADER` behavior, local metadata/log persistence, and a passing automated Scala test suite for the clustered prototype.
 
 ## Project documents
 
@@ -66,6 +66,7 @@ The current prototype is intentionally single-node, in-memory, non-replicated, a
 - [Request-flow diagrams](docs/diagrams/request-flow.md)
 - [Terminology](docs/terminology.md)
 - [Milestone 1 local demo](docs/demo/milestone-1.md)
+- [Milestone 2 clustered demo](docs/demo/milestone-2.md)
 
 ## Why leases are different from simple distributed locks
 
@@ -77,13 +78,13 @@ Tenure is intentionally scoped at the point where distributed-systems correctnes
 
 ## Future work
 
-Milestone 2 is the next planned milestone. It adds embedded Raft integration, replicated command flow for mutating operations, leader handling and redirection, and durable replicated log semantics while preserving the current API contract. Later milestones add persistent recovery, observability, failure injection, and a sharding-ready routing layer.
+Milestone 2 is now complete. Later milestones still need stronger recovery tooling, observability, and a sharding-ready routing layer.
 
 ## Local prototype
 
 Milestone 1 delivered a minimal single-node HTTP service built with Scala 3, Cats Effect, and http4s. It provides a local API surface, an in-memory lease state machine, deterministic time abstraction for tests, request validation, and tenant-scoped resource identity using `(tenant_id, resource_id)`.
 
-This prototype intentionally does not implement clustering, Raft replication, snapshots, or durable persistence yet; those boundaries define the Milestone 1 to Milestone 2 handoff.
+The Milestone 2 prototype intentionally stays narrow: one shared Raft group, TCP peer RPCs without multiplexing, durable metadata/log persistence, and leader-only reads in v1. It still does not implement multi-group sharding, membership changes, or full snapshot/compaction.
 
 ### Build and test
 
@@ -103,3 +104,14 @@ sbt run
 - `POST /v1/leases/renew`
 - `POST /v1/leases/release`
 - `GET /v1/leases/{tenant_id}/{resource_id}`
+
+
+### Run a local three-node cluster
+
+```bash
+sbt "run -- node-1.json"
+sbt "run -- node-2.json"
+sbt "run -- node-3.json"
+```
+
+See `docs/demo/milestone-2.md` for a static-config example and demo flow.

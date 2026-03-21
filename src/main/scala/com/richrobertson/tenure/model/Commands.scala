@@ -1,8 +1,5 @@
 package com.richrobertson.tenure.model
 
-import java.time.Instant
-import java.util.UUID
-
 sealed trait LeaseCommand:
   def resourceKey: ResourceKey
 
@@ -33,6 +30,3 @@ object LeaseResult:
   final case class Acquired(record: LeaseRecord) extends LeaseResult
   final case class Renewed(record: LeaseRecord) extends LeaseResult
   final case class Released(record: LeaseRecord) extends LeaseResult
-
-object LeaseId:
-  def random(): LeaseId = LeaseId(UUID.randomUUID())
