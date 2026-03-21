@@ -14,7 +14,10 @@ final case class RecoveredState(
 )
 
 object RecoveryBootstrap:
-  def recover[F[_]: Sync](persistence: RaftPersistence[F], nodeId: String = "local", observability: Observability[F] = Observability.noop[F], nowMillis: F[Long] = Sync[F].pure(0L)): F[RecoveredState] =
+  def recover[F[_]: Sync](persistence: RaftPersistence[F]): F[RecoveredState] =
+    recover(persistence, "local", Observability.noop[F], Sync[F].pure(0L))
+
+  def recover[F[_]: Sync](persistence: RaftPersistence[F], nodeId: String, observability: Observability[F], nowMillis: F[Long]): F[RecoveredState] =
     persistence.load.flatMap { persisted =>
       val validateSnapshotFormat: F[Unit] =
         persisted.snapshot match

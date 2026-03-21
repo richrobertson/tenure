@@ -223,3 +223,4 @@ class LeaseServiceSpec extends CatsEffectSuite:
     override def readState: IO[ServiceState] = stateRef.get
     override def canServeLeaderReads: IO[Boolean] = IO.pure(canServeReads)
     override def shutdown: IO[Unit] = IO.unit
+    override def currentTermValue: IO[Long] = IO.pure(0L)

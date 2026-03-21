@@ -178,7 +178,10 @@ trait RaftNode[F[_]]:
   def currentTermValue: F[Long]
 
 object RaftNode:
-  def resource[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F], quotas: TenantQuotaRegistry = TenantQuotaRegistry.default, observability: Observability[F] = Observability.noop[F]): Resource[F, RaftNode[F]] =
+  def resource[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F]): Resource[F, RaftNode[F]] =
+    resource(config, persistence, TenantQuotaRegistry.default, Observability.noop[F])
+
+  def resource[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F], quotas: TenantQuotaRegistry = TenantQuotaRegistry.default, observability: Observability[F]): Resource[F, RaftNode[F]] =
     Resource.make(create(config, persistence, quotas, observability))(_.shutdown).widen
 
   private def create[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F], quotas: TenantQuotaRegistry, observability: Observability[F]): F[LiveRaftNode[F]] =
@@ -380,7 +383,7 @@ private final class LiveRaftNode[F[_]: Async](
       observability.incrementCounter("leader_changes_total", Map("node_id" -> nodeId)) *>
       setRoleGauge(NodeRole.Leader) *>
       observability.log(LogEvent(nowMillis, "INFO", "role.transition", "node became leader", nodeId = Some(nodeId), term = Some(state.currentTerm), leaderId = Some(nodeId), result = Some("leader")))
-    }
+    }.void
 
   private final case class ReplicationOutcome(authoritative: Boolean, quorumAcknowledged: Boolean)
 
