@@ -4,10 +4,10 @@ import cats.effect.kernel.{Async, Resource, Temporal}
 import cats.effect.std.Mutex
 import cats.effect.{Fiber, Ref}
 import cats.syntax.all.*
-import com.richrobertson.tenure.model.LeaseView
-import com.richrobertson.tenure.persistence.RaftPersistence
+import com.richrobertson.tenure.persistence.{RaftPersistence, RecoveryBootstrap}
 import com.richrobertson.tenure.quota.TenantQuotaRegistry
 import com.richrobertson.tenure.service.*
+import com.richrobertson.tenure.service.ServiceCodecs.given
 import io.circe.Codec
 import io.circe.{Decoder, Encoder, Json}
 import io.circe.generic.semiauto.*
@@ -22,17 +22,21 @@ enum NodeRole derives CanEqual:
   case Leader, Follower, Candidate
 
 final case class NotLeader(leaderHint: Option[String]) derives CanEqual
-final case class PersistedMetadata(currentTerm: Long, votedFor: Option[String], commitIndex: Long) derives CanEqual
+final case class PersistedMetadata(currentTerm: Long, votedFor: Option[String], commitIndex: Long, lastApplied: Long) derives CanEqual
 object PersistedMetadata:
-  val initial: PersistedMetadata = PersistedMetadata(0L, None, 0L)
+  val initial: PersistedMetadata = PersistedMetadata(0L, None, 0L, 0L)
   given Codec[PersistedMetadata] = deriveCodec
 
 final case class RaftLogEntry(index: Long, term: Long, command: ReplicatedCommand) derives CanEqual
 object RaftLogEntry:
-  import PeerMessage.given
   given Codec[RaftLogEntry] = deriveCodec
 
-final case class PersistedNodeState(metadata: PersistedMetadata, entries: Vector[RaftLogEntry]) derives CanEqual
+final case class PersistedSnapshot(formatVersion: Int, lastIncludedIndex: Long, lastIncludedTerm: Long, serviceState: ServiceState) derives CanEqual
+object PersistedSnapshot:
+  val formatVersionV1 = 1
+  given Codec[PersistedSnapshot] = deriveCodec
+
+final case class PersistedNodeState(metadata: PersistedMetadata, snapshot: Option[PersistedSnapshot], entries: Vector[RaftLogEntry]) derives CanEqual
 object PersistedNodeState:
   given Codec[PersistedNodeState] = deriveCodec
 
@@ -53,88 +57,7 @@ object PeerMessage:
   given Codec[AppendEntriesResponse] = deriveCodec
   given Codec[VoteRequest] = deriveCodec
   given Codec[VoteResponse] = deriveCodec
-  given Codec[AcquireCommand] = deriveCodec
-  given Codec[RenewCommand] = deriveCodec
-  given Codec[ReleaseCommand] = deriveCodec
-  given Codec[RequestContext] = deriveCodec
-  given Codec[LeaseView] = deriveCodec
-  given Codec[AcquireResult] = deriveCodec
-  given Codec[RenewResult] = deriveCodec
-  given Codec[ReleaseResult] = deriveCodec
-  given Codec[ServiceError] = Codec.from(serviceErrorDecoder, serviceErrorEncoder)
-  given Codec[ReplicatedCommand] = Codec.from(commandDecoder, commandEncoder)
-  private def eitherDecoder[A: Decoder]: Decoder[Either[ServiceError, A]] = Decoder.instance { cursor =>
-    cursor.get[String]("type").flatMap {
-      case "left"  => cursor.get[ServiceError]("value").map(Left.apply)
-      case "right" => cursor.get[A]("value").map(Right.apply)
-      case other    => Left(io.circe.DecodingFailure(s"unknown either type $other", cursor.history))
-    }
-  }
-
-  private def eitherEncoder[A: Encoder]: Encoder[Either[ServiceError, A]] = Encoder.instance {
-    case Left(error)   => Json.obj("type" -> Json.fromString("left"), "value" -> error.asJson)
-    case Right(result) => Json.obj("type" -> Json.fromString("right"), "value" -> result.asJson)
-  }
-
-  given Codec[StoredResult] = Codec.from(storedResultDecoder, storedResultEncoder)
   given Codec[PeerMessage] = Codec.from(peerMessageDecoder, peerMessageEncoder)
-
-  private val serviceErrorDecoder: Decoder[ServiceError] = Decoder.instance { cursor =>
-    cursor.get[String]("type").flatMap {
-      case "invalid_request" => cursor.get[String]("message").map(ServiceError.InvalidRequest.apply)
-      case "unauthorized"   => cursor.get[String]("message").map(ServiceError.Unauthorized.apply)
-      case "forbidden"      => cursor.get[String]("message").map(ServiceError.Forbidden.apply)
-      case "already_held"   => cursor.get[String]("message").map(ServiceError.AlreadyHeld.apply)
-      case "lease_expired"  => cursor.get[String]("message").map(ServiceError.LeaseExpired.apply)
-      case "lease_mismatch" => cursor.get[String]("message").map(ServiceError.LeaseMismatch.apply)
-      case "not_found"      => cursor.get[String]("message").map(ServiceError.NotFound.apply)
-      case "quota_exceeded" => cursor.get[String]("message").map(ServiceError.QuotaExceeded.apply)
-      case "not_leader"     => (cursor.get[String]("message"), cursor.get[Option[String]]("leader_hint")).mapN(ServiceError.NotLeader.apply)
-      case other              => Left(io.circe.DecodingFailure(s"unknown service error $other", cursor.history))
-    }
-  }
-
-  private val serviceErrorEncoder: Encoder[ServiceError] = Encoder.instance {
-    case ServiceError.InvalidRequest(message)        => Json.obj("type" -> Json.fromString("invalid_request"), "message" -> Json.fromString(message))
-    case ServiceError.Unauthorized(message)          => Json.obj("type" -> Json.fromString("unauthorized"), "message" -> Json.fromString(message))
-    case ServiceError.Forbidden(message)             => Json.obj("type" -> Json.fromString("forbidden"), "message" -> Json.fromString(message))
-    case ServiceError.AlreadyHeld(message)           => Json.obj("type" -> Json.fromString("already_held"), "message" -> Json.fromString(message))
-    case ServiceError.LeaseExpired(message)          => Json.obj("type" -> Json.fromString("lease_expired"), "message" -> Json.fromString(message))
-    case ServiceError.LeaseMismatch(message)         => Json.obj("type" -> Json.fromString("lease_mismatch"), "message" -> Json.fromString(message))
-    case ServiceError.NotFound(message)              => Json.obj("type" -> Json.fromString("not_found"), "message" -> Json.fromString(message))
-    case ServiceError.QuotaExceeded(message)         => Json.obj("type" -> Json.fromString("quota_exceeded"), "message" -> Json.fromString(message))
-    case ServiceError.NotLeader(message, leaderHint) => Json.obj("type" -> Json.fromString("not_leader"), "message" -> Json.fromString(message), "leader_hint" -> leaderHint.asJson)
-  }
-
-  private val commandDecoder: Decoder[ReplicatedCommand] = Decoder.instance { cursor =>
-    cursor.get[String]("type").flatMap {
-      case "acquire" => cursor.get[AcquireCommand]("payload")
-      case "renew"   => cursor.get[RenewCommand]("payload")
-      case "release" => cursor.get[ReleaseCommand]("payload")
-      case other      => Left(io.circe.DecodingFailure(s"unknown command $other", cursor.history))
-    }
-  }
-
-  private val commandEncoder: Encoder[ReplicatedCommand] = Encoder.instance {
-    case payload: AcquireCommand => Json.obj("type" -> Json.fromString("acquire"), "payload" -> payload.asJson)
-    case payload: RenewCommand   => Json.obj("type" -> Json.fromString("renew"), "payload" -> payload.asJson)
-    case payload: ReleaseCommand => Json.obj("type" -> Json.fromString("release"), "payload" -> payload.asJson)
-  }
-
-  private val storedResultDecoder: Decoder[StoredResult] = Decoder.instance { cursor =>
-    cursor.get[String]("type").flatMap {
-      case "acquire" => cursor.downField("payload").as(eitherDecoder[AcquireResult]).map(StoredResult.Acquire.apply)
-      case "renew"   => cursor.downField("payload").as(eitherDecoder[RenewResult]).map(StoredResult.Renew.apply)
-      case "release" => cursor.downField("payload").as(eitherDecoder[ReleaseResult]).map(StoredResult.Release.apply)
-      case other      => Left(io.circe.DecodingFailure(s"unknown stored result $other", cursor.history))
-    }
-  }
-
-  private val storedResultEncoder: Encoder[StoredResult] = Encoder.instance {
-    case payload: StoredResult.Acquire => Json.obj("type" -> Json.fromString("acquire"), "payload" -> eitherEncoder[AcquireResult].apply(payload.value))
-    case payload: StoredResult.Renew   => Json.obj("type" -> Json.fromString("renew"), "payload" -> eitherEncoder[RenewResult].apply(payload.value))
-    case payload: StoredResult.Release => Json.obj("type" -> Json.fromString("release"), "payload" -> eitherEncoder[ReleaseResult].apply(payload.value))
-  }
 
   private val peerMessageDecoder: Decoder[PeerMessage] = Decoder.instance { cursor =>
     cursor.get[String]("type").flatMap {
@@ -159,6 +82,7 @@ final case class RaftRuntimeState(
     role: NodeRole,
     leaderId: Option[String],
     log: Vector[RaftLogEntry],
+    snapshot: Option[PersistedSnapshot],
     commitIndex: Long,
     lastApplied: Long,
     materialized: ServiceState,
@@ -168,22 +92,32 @@ final case class RaftRuntimeState(
 ) derives CanEqual
 
 object RaftTransitions:
+  private def lastIndex(state: RaftRuntimeState): Long =
+    state.log.lastOption.map(_.index).orElse(state.snapshot.map(_.lastIncludedIndex)).getOrElse(0L)
+
+  private def termAt(state: RaftRuntimeState, index: Long): Option[Long] =
+    if index == 0 then Some(0L)
+    else
+      state.snapshot.filter(_.lastIncludedIndex == index).map(_.lastIncludedTerm)
+        .orElse(state.log.find(_.index == index).map(_.term))
+
   def handleVoteRequest(state: RaftRuntimeState, request: VoteRequest, now: Long): (RaftRuntimeState, VoteResponse) =
     if request.term < state.currentTerm then state -> VoteResponse(state.currentTerm, voteGranted = false)
     else
       val termAdjusted =
         if request.term > state.currentTerm then state.copy(currentTerm = request.term, votedFor = None, role = NodeRole.Follower, leaderId = None)
         else state
-      val localLast = termAdjusted.log.lastOption
-      val upToDate = request.lastLogTerm > localLast.map(_.term).getOrElse(0L) ||
-        (request.lastLogTerm == localLast.map(_.term).getOrElse(0L) && request.lastLogIndex >= localLast.map(_.index).getOrElse(0L))
+      val localLastIndex = lastIndex(termAdjusted)
+      val localLastTerm = termAt(termAdjusted, localLastIndex).getOrElse(0L)
+      val upToDate = request.lastLogTerm > localLastTerm ||
+        (request.lastLogTerm == localLastTerm && request.lastLogIndex >= localLastIndex)
       val canVote = termAdjusted.votedFor.forall(_ == request.candidateId)
       val granted = canVote && upToDate
       val next = if granted then termAdjusted.copy(votedFor = Some(request.candidateId), lastHeartbeatMillis = now) else termAdjusted.copy(lastHeartbeatMillis = now)
       next -> VoteResponse(next.currentTerm, granted)
 
   def handleAppendEntries(state: RaftRuntimeState, request: AppendEntriesRequest, now: Long, quotas: TenantQuotaRegistry = TenantQuotaRegistry.default): (RaftRuntimeState, AppendEntriesResponse) =
-    if request.term < state.currentTerm then state -> AppendEntriesResponse(state.currentTerm, success = false, state.log.lastOption.map(_.index).getOrElse(0L))
+    if request.term < state.currentTerm then state -> AppendEntriesResponse(state.currentTerm, success = false, lastIndex(state))
     else
       val base =
         if request.term > state.currentTerm then
@@ -192,19 +126,19 @@ object RaftTransitions:
           state.copy(role = NodeRole.Follower, leaderId = Some(request.leaderId), lastHeartbeatMillis = now)
       val prevMatches =
         if request.prevLogIndex == 0 then true
-        else base.log.lift((request.prevLogIndex - 1).toInt).exists(_.term == request.prevLogTerm)
-      if !prevMatches then base -> AppendEntriesResponse(base.currentTerm, success = false, base.log.lastOption.map(_.index).getOrElse(0L))
+        else termAt(base, request.prevLogIndex).contains(request.prevLogTerm)
+      if !prevMatches then base -> AppendEntriesResponse(base.currentTerm, success = false, lastIndex(base))
       else
-        val prefix = base.log.take(request.prevLogIndex.toInt)
+        val prefix = base.log.takeWhile(_.index <= request.prevLogIndex)
         val nextLog = if request.entries.isEmpty then base.log else prefix ++ request.entries
-        val cappedCommit = math.min(request.leaderCommit, nextLog.lastOption.map(_.index).getOrElse(base.commitIndex))
+        val cappedCommit = math.min(request.leaderCommit, nextLog.lastOption.map(_.index).orElse(base.snapshot.map(_.lastIncludedIndex)).getOrElse(base.commitIndex))
         val entriesToApply = nextLog.filter(entry => entry.index > base.lastApplied && entry.index <= cappedCommit).sortBy(_.index)
         val materialized = entriesToApply.foldLeft(base.materialized) { case (acc, entry) => LeaseMaterializer.applyCommand(acc, entry.command) }
         val next = base.copy(log = nextLog, commitIndex = cappedCommit, lastApplied = math.max(base.lastApplied, cappedCommit), materialized = materialized)
-        next -> AppendEntriesResponse(next.currentTerm, success = true, next.log.lastOption.map(_.index).getOrElse(0L))
+        next -> AppendEntriesResponse(next.currentTerm, success = true, lastIndex(next))
 
   def majorityMatchedIndex(state: RaftRuntimeState, majority: Int): Long =
-    val matchIndexes = state.peerProgress.values.map(_.matchIndex).toList :+ state.log.lastOption.map(_.index).getOrElse(0L)
+    val matchIndexes = state.peerProgress.values.map(_.matchIndex).toList :+ lastIndex(state)
     val candidates = matchIndexes.sorted
     candidates.drop(candidates.size - majority).headOption.getOrElse(0L)
 
@@ -213,7 +147,7 @@ object RaftTransitions:
     val candidate = majorityMatchedIndex(state, majority)
     if candidate <= state.commitIndex then None
     else
-      state.log.lift((candidate - 1L).toInt).filter(_.term == state.currentTerm).map(_.index)
+      termAt(state, candidate).filter(_ == state.currentTerm).map(_ => candidate)
 
 trait RaftNode[F[_]]:
   def nodeId: String
@@ -230,18 +164,19 @@ object RaftNode:
 
   private def create[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F], quotas: TenantQuotaRegistry): F[LiveRaftNode[F]] =
     for
-      persisted <- persistence.load
+      recovered <- RecoveryBootstrap.recover(persistence)
       nowMillis <- Temporal[F].realTime.map(_.toMillis)
       stateRef <- Ref.of[F, RaftRuntimeState](
         RaftRuntimeState(
-          currentTerm = persisted.metadata.currentTerm,
-          votedFor = persisted.metadata.votedFor,
+          currentTerm = recovered.persisted.metadata.currentTerm,
+          votedFor = recovered.persisted.metadata.votedFor,
           role = NodeRole.Follower,
           leaderId = None,
-          log = persisted.entries,
-          commitIndex = persisted.metadata.commitIndex,
-          lastApplied = persisted.metadata.commitIndex,
-          materialized = replayCommitted(persisted.entries, persisted.metadata.commitIndex, quotas),
+          log = recovered.persisted.entries,
+          snapshot = recovered.persisted.snapshot,
+          commitIndex = recovered.commitIndex,
+          lastApplied = recovered.lastApplied,
+          materialized = recovered.materialized,
           lastHeartbeatMillis = nowMillis,
           lastQuorumAckMillis = 0L,
           peerProgress = Map.empty
@@ -253,11 +188,6 @@ object RaftNode:
       node = new LiveRaftNode[F](config, persistence, stateRef, mutex, serverRef, fibersRef, quotas)
       _ <- node.start
     yield node
-
-  private def replayCommitted(entries: Vector[RaftLogEntry], commitIndex: Long, quotas: TenantQuotaRegistry): ServiceState =
-    entries.filter(_.index <= commitIndex).sortBy(_.index).foldLeft(ServiceState.empty) { case (state, entry) =>
-      LeaseMaterializer.applyCommand(state, entry.command)
-    }
 
 private final class LiveRaftNode[F[_]: Async](
     config: ClusterConfig,
@@ -275,6 +205,7 @@ private final class LiveRaftNode[F[_]: Async](
   private val heartbeatInterval = 150.millis
   private val quorumLeaseTimeout = 900.millis
   private val peerIoTimeoutMillis = 1000
+  private val snapshotThreshold = 5L
 
   def start: F[Unit] =
     for
@@ -297,7 +228,7 @@ private final class LiveRaftNode[F[_]: Async](
       assertLeaderAuthority.flatMap {
         case Left(notLeader) => notLeader.asLeft[StoredResult].pure[F]
         case Right(leaderState) =>
-          val entry = RaftLogEntry(leaderState.log.size.toLong + 1L, leaderState.currentTerm, command)
+          val entry = RaftLogEntry(lastLogIndex(leaderState) + 1L, leaderState.currentTerm, command)
           for
             _ <- persistence.appendEntry(entry)
             _ <- stateRef.update(current => current.copy(log = current.log :+ entry))
@@ -383,10 +314,11 @@ private final class LiveRaftNode[F[_]: Async](
           )
           next -> next
         }
-        _ <- persistence.saveMetadata(PersistedMetadata(candidate.currentTerm, candidate.votedFor, candidate.commitIndex))
-        last = candidate.log.lastOption
+        _ <- persistMetadata(candidate)
+        lastIndex = lastLogIndex(candidate)
+        lastTerm = termAt(candidate, lastIndex).getOrElse(0L)
         votes <- config.raftPeers.filterNot(_.nodeId == config.nodeId).traverse { peer =>
-          send(peer, PeerMessage.RequestVote(VoteRequest(candidate.currentTerm, config.nodeId, last.map(_.index).getOrElse(0L), last.map(_.term).getOrElse(0L)))).attempt.flatMap {
+          send(peer, PeerMessage.RequestVote(VoteRequest(candidate.currentTerm, config.nodeId, lastIndex, lastTerm))).attempt.flatMap {
             case Right(PeerMessage.RequestVoteAck(response)) =>
               if response.term > candidate.currentTerm then stepDown(response.term, None).as(false)
               else response.voteGranted.pure[F]
@@ -401,9 +333,9 @@ private final class LiveRaftNode[F[_]: Async](
 
   private def becomeLeader(nowMillis: Long): F[Unit] =
     stateRef.update { state =>
-      val lastLogIndex = state.log.lastOption.map(_.index).getOrElse(0L)
+      val nextLogIndex = lastLogIndex(state)
       val progress = config.raftPeers.filterNot(_.nodeId == config.nodeId).map { peer =>
-        peer.nodeId -> PeerProgress(nextIndex = lastLogIndex + 1L, matchIndex = 0L)
+        peer.nodeId -> PeerProgress(nextIndex = nextLogIndex + 1L, matchIndex = state.snapshot.map(_.lastIncludedIndex).getOrElse(0L))
       }.toMap
       state.copy(
         role = NodeRole.Leader,
@@ -442,12 +374,11 @@ private final class LiveRaftNode[F[_]: Async](
     stateRef.get.flatMap { state =>
       if state.role != NodeRole.Leader || term != state.currentTerm then false.pure[F]
       else
-        val nextIndex = math.max(1L, progress.nextIndex)
+        val snapshotFloor = state.snapshot.map(_.lastIncludedIndex + 1L).getOrElse(1L)
+        val nextIndex = math.max(snapshotFloor, progress.nextIndex)
         val prevLogIndex = nextIndex - 1L
-        val prevLogTerm =
-          if prevLogIndex == 0 then 0L
-          else state.log.lift((prevLogIndex - 1L).toInt).map(_.term).getOrElse(0L)
-        val suffix = state.log.drop((nextIndex - 1L).toInt)
+        val prevLogTerm = termAt(state, prevLogIndex).getOrElse(0L)
+        val suffix = state.log.filter(_.index >= nextIndex)
         val request = AppendEntriesRequest(state.currentTerm, config.nodeId, prevLogIndex, prevLogTerm, suffix, state.commitIndex)
         send(peer, PeerMessage.AppendEntries(request)).attempt.flatMap {
           case Right(PeerMessage.AppendEntriesAck(response)) if response.term > state.currentTerm =>
@@ -458,7 +389,7 @@ private final class LiveRaftNode[F[_]: Async](
               val updated = PeerProgress(nextIndex = matched + 1L, matchIndex = matched)
               current.copy(peerProgress = current.peerProgress.updated(peer.nodeId, updated))
             }.as(true)
-          case Right(PeerMessage.AppendEntriesAck(_)) if nextIndex > 1L =>
+          case Right(PeerMessage.AppendEntriesAck(_)) if nextIndex > snapshotFloor =>
             stateRef.update(current => current.copy(peerProgress = current.peerProgress.updated(peer.nodeId, progress.copy(nextIndex = nextIndex - 1L)))).flatMap(_ =>
               syncPeer(term, peer, progress.copy(nextIndex = nextIndex - 1L))
             )
@@ -475,7 +406,8 @@ private final class LiveRaftNode[F[_]: Async](
         val next = state.copy(commitIndex = index, lastApplied = index, materialized = materialized)
         next -> next
       }
-      _ <- persistence.saveMetadata(PersistedMetadata(updated.currentTerm, updated.votedFor, updated.commitIndex))
+      _ <- persistMetadata(updated)
+      _ <- maybeSnapshotAndCompact(updated)
     yield ()
 
   private def readCommittedResult(requestContext: RequestContext): F[Either[NotLeader, StoredResult]] =
@@ -513,7 +445,7 @@ private final class LiveRaftNode[F[_]: Async](
         now <- Temporal[F].realTime.map(_.toMillis)
         response <- stateRef.modify(state => RaftTransitions.handleVoteRequest(state, request, now))
         current <- stateRef.get
-        _ <- persistence.saveMetadata(PersistedMetadata(current.currentTerm, current.votedFor, current.commitIndex))
+        _ <- persistMetadata(current)
       yield response
     }
 
@@ -524,7 +456,8 @@ private final class LiveRaftNode[F[_]: Async](
         response <- stateRef.modify(state => RaftTransitions.handleAppendEntries(state, request, now, quotas))
         current <- stateRef.get
         _ <- persistence.overwriteEntries(current.log)
-        _ <- persistence.saveMetadata(PersistedMetadata(current.currentTerm, current.votedFor, current.commitIndex))
+        _ <- persistMetadata(current)
+        _ <- maybeSnapshotAndCompact(current)
       yield response
     }
 
@@ -543,7 +476,7 @@ private final class LiveRaftNode[F[_]: Async](
         )
       }
       current <- stateRef.get
-      _ <- persistence.saveMetadata(PersistedMetadata(current.currentTerm, current.votedFor, current.commitIndex))
+      _ <- persistMetadata(current)
     yield ()
 
   private def send(peer: PeerNode, message: PeerMessage): F[PeerMessage] =
@@ -571,3 +504,34 @@ private final class LiveRaftNode[F[_]: Async](
         case idx => math.min(spread, idx.toLong * 83L)
       (electionMin.toMillis + ((now + nodeOffset) % (spread + 1L))).millis
     }
+
+  private def persistMetadata(state: RaftRuntimeState): F[Unit] =
+    persistence.saveMetadata(PersistedMetadata(state.currentTerm, state.votedFor, state.commitIndex, state.lastApplied))
+
+  private def maybeSnapshotAndCompact(state: RaftRuntimeState): F[Unit] =
+    val lastSnapIndex = state.snapshot.map(_.lastIncludedIndex).getOrElse(0L)
+    if state.commitIndex - lastSnapIndex < snapshotThreshold then Async[F].unit
+    else
+      val snapshotTerm = termAt(state, state.commitIndex).getOrElse(state.currentTerm)
+      val snapshot = PersistedSnapshot(
+        formatVersion = PersistedSnapshot.formatVersionV1,
+        lastIncludedIndex = state.commitIndex,
+        lastIncludedTerm = snapshotTerm,
+        serviceState = state.materialized
+      )
+      val compactedLog = state.log.filter(_.index > snapshot.lastIncludedIndex)
+      for
+        _ <- persistence.saveSnapshot(snapshot)
+        _ <- persistence.overwriteEntries(compactedLog)
+        compacted <- stateRef.updateAndGet(_.copy(snapshot = Some(snapshot), log = compactedLog))
+        _ <- persistMetadata(compacted)
+      yield ()
+
+  private def lastLogIndex(state: RaftRuntimeState): Long =
+    state.log.lastOption.map(_.index).orElse(state.snapshot.map(_.lastIncludedIndex)).getOrElse(0L)
+
+  private def termAt(state: RaftRuntimeState, index: Long): Option[Long] =
+    if index == 0 then Some(0L)
+    else
+      state.snapshot.filter(_.lastIncludedIndex == index).map(_.lastIncludedTerm)
+        .orElse(state.log.find(_.index == index).map(_.term))

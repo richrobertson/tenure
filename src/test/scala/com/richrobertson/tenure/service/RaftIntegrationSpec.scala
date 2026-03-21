@@ -7,12 +7,13 @@ import com.richrobertson.tenure.auth.Principal
 import com.richrobertson.tenure.model.{LeaseStatus, ResourceId, TenantId}
 import com.richrobertson.tenure.persistence.RaftPersistence
 import com.richrobertson.tenure.quota.TenantQuotaPolicy
-import com.richrobertson.tenure.raft.{ClusterConfig, NodeRole, PeerNode, PersistedMetadata, RaftLogEntry, RaftNode}
+import com.richrobertson.tenure.raft.{ClusterConfig, NodeRole, PeerNode, PersistedMetadata, PersistedSnapshot, RaftLogEntry, RaftNode}
+import com.richrobertson.tenure.service.ServiceCodecs.given
 import com.richrobertson.tenure.time.Clock
 import munit.CatsEffectSuite
 
 import java.net.ServerSocket
-import java.nio.file.Files
+import java.nio.file.{Files, Paths}
 import java.time.Instant
 import java.util.concurrent.TimeoutException
 import scala.concurrent.duration.*
@@ -82,7 +83,7 @@ class RaftIntegrationSpec extends CatsEffectSuite:
       persistence <- RaftPersistence.fileBacked[IO](root.toString)
       _ <- persistence.appendEntry(RaftLogEntry(1L, 3L, acquire))
       _ <- persistence.appendEntry(RaftLogEntry(2L, 3L, renew))
-      _ <- persistence.saveMetadata(PersistedMetadata(currentTerm = 3L, votedFor = Some("node-1"), commitIndex = 2L))
+      _ <- persistence.saveMetadata(PersistedMetadata(currentTerm = 3L, votedFor = Some("node-1"), commitIndex = 2L, lastApplied = 2L))
       loaded <- persistence.load
       replayed = loaded.entries.filter(_.index <= loaded.metadata.commitIndex).sortBy(_.index).foldLeft(ServiceState.empty) { case (state, entry) =>
         LeaseMaterializer.applyCommand(state, entry.command)
@@ -96,6 +97,55 @@ class RaftIntegrationSpec extends CatsEffectSuite:
       assertEquals(leaseView.expiresAt, Some(appliedAt.plusSeconds(35)))
       assert(replayed.responses.contains((tenantId, com.richrobertson.tenure.model.RequestId("req-1"))))
       assert(replayed.responses.contains((tenantId, com.richrobertson.tenure.model.RequestId("req-2"))))
+  }
+
+  test("snapshot recovery and compaction preserve leases, dedupe, fencing, and tenant quota state") {
+    retrying("snapshot recovery", attempts = 2, attemptTimeout = 25.seconds) {
+      withCluster(3).use { cluster =>
+        for
+          leader <- awaitLeader(cluster.nodes)
+          service = cluster.service(leader.nodeId)
+          acquire1 <- service.acquire(AcquireRequest(principal, tenantId.value, "resource-1", "holder-1", 20, "req-1"))
+          _ = assert(acquire1.isRight)
+          acquire2 <- service.acquire(AcquireRequest(principal, tenantId.value, "resource-2", "holder-2", 20, "req-2"))
+          _ = assert(acquire2.isRight)
+          leaseId1 = leaseId(acquire1)
+          leaseId2 = leaseId(acquire2)
+          _ <- service.renew(RenewRequest(principal, tenantId.value, "resource-1", leaseId1, "holder-1", 25, "req-3")).map(result => assert(result.isRight))
+          _ <- service.release(ReleaseRequest(principal, tenantId.value, "resource-2", leaseId2, "holder-2", "req-4")).map(result => assert(result.isRight))
+          _ <- service.acquire(AcquireRequest(principal, tenantId.value, "resource-3", "holder-3", 20, "req-5")).map(result => assert(result.isRight))
+          _ <- service.acquire(AcquireRequest(principal, tenantId.value, "resource-4", "holder-4", 20, "req-6")).map(result => assert(result.isRight))
+          _ <- eventually("snapshot file creation") {
+            IO.blocking {
+              val snapshotPath = Paths.get(cluster.dataDirs(leader.nodeId)).resolve("snapshot.json")
+              val contents = Files.readString(snapshotPath)
+              if contents.trim.nonEmpty then ()
+              else throw new IllegalStateException("snapshot file exists but is empty")
+            }
+          }
+          restart <- allocateNode(cluster.configs(leader.nodeId), cluster.dataDirs(leader.nodeId))
+          (releaseRestarted, restartedNode) = restart
+          _ <- awaitFollowerView(restartedNode, LeaseStatus.Active)
+          replayedRead <- restartedNode.readState
+          _ = assert(replayedRead.responses.contains((tenantId, com.richrobertson.tenure.model.RequestId("req-1"))))
+          snapshotJson <- IO.blocking(Files.readString(Paths.get(cluster.dataDirs(leader.nodeId)).resolve("snapshot.json")))
+          logLines <- IO.blocking(Files.readAllLines(Paths.get(cluster.dataDirs(leader.nodeId)).resolve("log.jsonl")).size())
+          snapshot = io.circe.parser.decode[PersistedSnapshot](snapshotJson).fold(error => fail(error.getMessage), identity)
+          _ = assert(snapshot.lastIncludedIndex >= 5L)
+          _ = assertEquals(snapshot.formatVersion, PersistedSnapshot.formatVersionV1)
+          _ = assert(snapshot.serviceState.responses.contains((tenantId, com.richrobertson.tenure.model.RequestId("req-3"))))
+          _ = assert(snapshot.serviceState.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, ResourceId("resource-1"))).exists(_.fencingToken == 1L))
+          _ = assert(snapshot.serviceState.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, ResourceId("resource-2"))).exists(_.status == LeaseStatus.Released))
+          _ = assert(replayedRead.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, ResourceId("resource-3"))).exists(_.holderId.value == "holder-3"))
+          _ = assert(logLines <= 1)
+          follower <- cluster.nodes.filterNot(_.nodeId == leader.nodeId).headOption.liftTo[IO](new IllegalStateException("missing follower"))
+          followerService = cluster.service(follower.nodeId)
+          followerRead <- followerService.getLease(GetLeaseRequest(principal, tenantId.value, "resource-1"))
+          _ = assert(followerRead.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
+          _ <- releaseRestarted
+        yield ()
+      }
+    }
   }
 
   private final case class RunningCluster(
