@@ -90,9 +90,9 @@ class RaftIntegrationSpec extends CatsEffectSuite:
       peerPorts <- Resource.eval(List.fill(3)(freeLocalPort).sequence)
       apiPorts <- Resource.eval(List.fill(3)(freeLocalPort).sequence)
       peers = List(
-        PeerNode("node-1", "127.0.0.1", peerPorts(0)),
-        PeerNode("node-2", "127.0.0.1", peerPorts(1)),
-        PeerNode("node-3", "127.0.0.1", peerPorts(2))
+        PeerNode("node-1", "127.0.0.1", peerPorts(0), "127.0.0.1", apiPorts(0)),
+        PeerNode("node-2", "127.0.0.1", peerPorts(1), "127.0.0.1", apiPorts(1)),
+        PeerNode("node-3", "127.0.0.1", peerPorts(2), "127.0.0.1", apiPorts(2))
       )
       node1 <- TestNode.resource(ClusterConfig("node-1", "127.0.0.1", apiPorts(0), peers, root.resolve("node-1").toString))
       node2 <- TestNode.resource(ClusterConfig("node-2", "127.0.0.1", apiPorts(1), peers, root.resolve("node-2").toString))

@@ -23,14 +23,14 @@ Create three config files like the following.
   "apiPort": 8081,
   "dataDir": "/tmp/tenure/node-1",
   "peers": [
-    { "nodeId": "node-1", "host": "127.0.0.1", "port": 19091 },
-    { "nodeId": "node-2", "host": "127.0.0.1", "port": 19092 },
-    { "nodeId": "node-3", "host": "127.0.0.1", "port": 19093 }
+    { "nodeId": "node-1", "host": "127.0.0.1", "port": 19091, "apiHost": "127.0.0.1", "apiPort": 8081 },
+    { "nodeId": "node-2", "host": "127.0.0.1", "port": 19092, "apiHost": "127.0.0.1", "apiPort": 8082 },
+    { "nodeId": "node-3", "host": "127.0.0.1", "port": 19093, "apiHost": "127.0.0.1", "apiPort": 8083 }
   ]
 }
 ```
 
-Create `node-2.json` and `node-3.json` by changing `nodeId`, `apiPort`, and `dataDir`. Peer endpoints stay explicit and DNS-free.
+Create `node-2.json` and `node-3.json` by changing `nodeId`, the top-level `apiPort`, each peer entry's `apiPort`, and `dataDir`. Peer transport endpoints stay explicit and DNS-free, and `leader_hint` now points at each node's HTTP API listener rather than its Raft socket.
 
 ## Run three nodes
 
