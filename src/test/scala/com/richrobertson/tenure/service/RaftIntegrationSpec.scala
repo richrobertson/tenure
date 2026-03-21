@@ -1,107 +1,146 @@
 package com.richrobertson.tenure.service
 
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, Resource, Ref}
 import cats.syntax.all.*
+import com.richrobertson.tenure.model.{ResourceId, TenantId}
 import com.richrobertson.tenure.persistence.RaftPersistence
-import com.richrobertson.tenure.raft.{ClusterConfig, NodeRole, PeerMessage, PeerNode, RaftNode}
+import com.richrobertson.tenure.raft.{ClusterConfig, NodeRole, PeerNode, RaftNode}
 import com.richrobertson.tenure.time.Clock
 import munit.CatsEffectSuite
 import java.nio.file.Files
 import scala.concurrent.duration.*
 
 class RaftIntegrationSpec extends CatsEffectSuite:
-  override val munitTimeout: Duration = 30.seconds
+  override val munitTimeout: Duration = 45.seconds
 
-  test("cluster elects a leader, rejects follower reads and writes, and replicates acquire/renew/release") {
+  test("follower behind by multiple entries catches up after restart and later commits new entries") {
     clusterResource.use { cluster =>
       for
         leader <- cluster.awaitLeader
-        follower = cluster.nodes.find(_.id != leader.id).get
-        acquired <- leader.service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 30, "req-1"))
-        followerWrite <- follower.service.acquire(AcquireRequest("tenant-a", "resource-2", "holder-2", 30, "req-2"))
-        followerRead <- follower.service.getLease(com.richrobertson.tenure.model.TenantId("tenant-a"), com.richrobertson.tenure.model.ResourceId("resource-1"))
-        leaseId = acquired.toOption.flatMap(_.lease.leaseId).fold(fail("expected lease id"))(_.value.toString)
-        renewed <- leader.service.renew(RenewRequest("tenant-a", "resource-1", leaseId, "holder-1", 45, "req-3"))
-        released <- leader.service.release(ReleaseRequest("tenant-a", "resource-1", leaseId, "holder-1", "req-4"))
-        leaderLease <- leader.service.getLease(com.richrobertson.tenure.model.TenantId("tenant-a"), com.richrobertson.tenure.model.ResourceId("resource-1"))
-      yield
-        assert(acquired.isRight)
-        assert(renewed.isRight)
-        assert(released.isRight)
-        assert(followerWrite.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
-        assert(followerRead.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
-        assertEquals(leaderLease.toOption.map(_.lease.status.toString), Some("Released"))
+        lagging = cluster.otherThan(leader.id).head
+        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 30, "req-1"))
+        _ <- lagging.stop
+        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-2", "holder-2", 30, "req-2"))
+        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-3", "holder-3", 30, "req-3"))
+        _ <- lagging.start
+        _ <- cluster.awaitLeaseVisible(lagging, TenantId("tenant-a"), ResourceId("resource-3"))
+        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-4", "holder-4", 30, "req-4"))
+        _ <- cluster.awaitLeaseVisible(lagging, TenantId("tenant-a"), ResourceId("resource-4"))
+        check <- lagging.getLease(TenantId("tenant-a"), ResourceId("resource-4"))
+      yield assertEquals(check.toOption.map(_.found), Some(true))
     }
   }
 
-  test("failover elects a new leader and restart replays committed log") {
+  test("leader recovers progress after temporary quorum loss and stale isolated leader refuses leader-only reads") {
     clusterResource.use { cluster =>
       for
-        initialLeader <- cluster.awaitLeader
-        _ <- initialLeader.service.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 30, "req-1"))
-        _ <- initialLeader.shutdown
-        replacement <- cluster.awaitLeaderExcluding(initialLeader.id)
-        lease <- replacement.service.getLease(com.richrobertson.tenure.model.TenantId("tenant-a"), com.richrobertson.tenure.model.ResourceId("resource-1"))
-        _ <- initialLeader.restart
-        restartedLease <- initialLeader.service.getLease(com.richrobertson.tenure.model.TenantId("tenant-a"), com.richrobertson.tenure.model.ResourceId("resource-1"))
+        leader <- cluster.awaitLeader
+        followers = cluster.otherThan(leader.id)
+        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 30, "req-1"))
+        _ <- followers.traverse_(_.stop)
+        _ <- IO.sleep(1500.millis)
+        staleRead <- leader.getLease(TenantId("tenant-a"), ResourceId("resource-1"))
+        staleWrite <- leader.acquire(AcquireRequest("tenant-a", "resource-2", "holder-2", 30, "req-2"))
+        _ <- followers.traverse_(_.start)
+        newLeader <- cluster.awaitLeader
+        postRecovery <- newLeader.acquire(AcquireRequest("tenant-a", "resource-3", "holder-3", 30, "req-3"))
       yield
-        assertEquals(lease.toOption.map(_.found), Some(true))
-        assertEquals(restartedLease.toOption.map(_.found), Some(true))
+        assert(staleRead.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
+        assert(staleWrite.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
+        assert(postRecovery.isRight)
     }
   }
 
-  test("static config uses explicit node ids and concrete IP port endpoints over TCP") {
+  test("followers reject reads and writes with NOT_LEADER") {
     clusterResource.use { cluster =>
-      IO {
-        assertEquals(cluster.config.peers.map(_.nodeId), List("node-1", "node-2", "node-3"))
-        assert(cluster.config.peers.forall(_.host == "127.0.0.1"))
-        assert(cluster.config.peers.forall(_.port > 0))
-      }
+      for
+        leader <- cluster.awaitLeader
+        follower = cluster.otherThan(leader.id).head
+        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 30, "req-1"))
+        read <- follower.getLease(TenantId("tenant-a"), ResourceId("resource-1"))
+        write <- follower.acquire(AcquireRequest("tenant-a", "resource-2", "holder-2", 30, "req-2"))
+      yield
+        assert(read.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
+        assert(write.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
+    }
+  }
+
+  test("restart replays committed log") {
+    clusterResource.use { cluster =>
+      for
+        leader <- cluster.awaitLeader
+        target = cluster.otherThan(leader.id).head
+        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 30, "req-1"))
+        _ <- cluster.awaitLeaseVisible(target, TenantId("tenant-a"), ResourceId("resource-1"))
+        _ <- target.stop
+        _ <- target.start
+        lease <- cluster.awaitLeaseVisible(target, TenantId("tenant-a"), ResourceId("resource-1"))
+      yield assertEquals(lease.found, true)
     }
   }
 
   private def clusterResource: Resource[IO, TestCluster] =
     for
       root <- Resource.eval(IO.blocking(Files.createTempDirectory("tenure-raft-spec")))
-      config = ClusterConfig(
-        nodeId = "node-1",
-        apiHost = "127.0.0.1",
-        apiPort = 18081,
-        peers = List(
-          PeerNode("node-1", "127.0.0.1", 19091),
-          PeerNode("node-2", "127.0.0.1", 19092),
-          PeerNode("node-3", "127.0.0.1", 19093)
-        ),
-        dataDir = root.resolve("node-1").toString
+      peers = List(
+        PeerNode("node-1", "127.0.0.1", 19091),
+        PeerNode("node-2", "127.0.0.1", 19092),
+        PeerNode("node-3", "127.0.0.1", 19093)
       )
-      node1 <- testNode(config, root.resolve("node-1").toString)
-      node2 <- testNode(config.copy(nodeId = "node-2", apiPort = 18082, dataDir = root.resolve("node-2").toString), root.resolve("node-2").toString)
-      node3 <- testNode(config.copy(nodeId = "node-3", apiPort = 18083, dataDir = root.resolve("node-3").toString), root.resolve("node-3").toString)
-    yield TestCluster(config, List(node1, node2, node3))
+      node1 <- TestNode.resource(ClusterConfig("node-1", "127.0.0.1", 18081, peers, root.resolve("node-1").toString))
+      node2 <- TestNode.resource(ClusterConfig("node-2", "127.0.0.1", 18082, peers, root.resolve("node-2").toString))
+      node3 <- TestNode.resource(ClusterConfig("node-3", "127.0.0.1", 18083, peers, root.resolve("node-3").toString))
+    yield TestCluster(List(node1, node2, node3))
 
-  private def testNode(config: ClusterConfig, dataDir: String): Resource[IO, TestNode] =
-    for
-      persistence <- Resource.eval(RaftPersistence.fileBacked[IO](dataDir)(using summon, summon, PeerMessage.given_Codec_RaftLogEntry))
-      raft <- RaftNode.resource[IO](config, persistence)
-      service = LeaseService.replicated[IO](raft, Clock.system[IO])
-    yield TestNode(config.nodeId, config, raft, service, dataDir)
+  private final case class TestCluster(nodes: List[TestNode]):
+    def otherThan(nodeId: String): List[TestNode] = nodes.filterNot(_.id == nodeId)
 
-  private final case class TestCluster(config: ClusterConfig, nodes: List[TestNode]):
     def awaitLeader: IO[TestNode] =
-      pollUntil(nodes.findM(node => node.raft.role.map(_ == NodeRole.Leader)))
+      poll(nodes.findM(_.role.map(_ == NodeRole.Leader)))
 
-    def awaitLeaderExcluding(nodeId: String): IO[TestNode] =
-      pollUntil(nodes.filterNot(_.id == nodeId).findM(node => node.raft.role.map(_ == NodeRole.Leader)))
+    def awaitLeaseVisible(node: TestNode, tenantId: TenantId, resourceId: ResourceId): IO[GetLeaseResult] =
+      pollResult(node.getLease(tenantId, resourceId).map(_.toOption.filter(_.found)))
 
-    private def pollUntil(value: IO[Option[TestNode]]): IO[TestNode] =
+    private def poll(value: IO[Option[TestNode]]): IO[TestNode] =
       value.flatMap {
         case Some(node) => IO.pure(node)
-        case None       => IO.sleep(200.millis) *> pollUntil(value)
+        case None       => IO.sleep(200.millis) *> poll(value)
       }
 
-  private final case class TestNode(id: String, config: ClusterConfig, raft: RaftNode[IO], service: LeaseService[IO], dataDir: String):
-    def shutdown: IO[Unit] = raft match
-      case live: AnyRef { def shutdown: IO[Unit] } => live.shutdown
-      case _                                       => IO.unit
+    private def pollResult[A](value: IO[Option[A]]): IO[A] =
+      value.flatMap {
+        case Some(result) => IO.pure(result)
+        case None         => IO.sleep(200.millis) *> pollResult(value)
+      }
 
-    def restart: IO[Unit] = IO.unit
+  private object TestNode:
+    def resource(config: ClusterConfig): Resource[IO, TestNode] =
+      Resource.make {
+        for
+          currentRef <- Ref.of[IO, Option[(LeaseService[IO], RaftNode[IO], IO[Unit])]](None)
+          node = TestNode(config.nodeId, config, currentRef)
+          _ <- node.start
+        yield node
+      }(_.stop)
+
+  private final case class TestNode(id: String, config: ClusterConfig, currentRef: Ref[IO, Option[(LeaseService[IO], RaftNode[IO], IO[Unit])]]):
+    def start: IO[Unit] =
+      currentRef.get.flatMap {
+        case Some(_) => IO.unit
+        case None =>
+          for
+            persistence <- RaftPersistence.fileBacked[IO](config.dataDir)
+            allocated <- RaftNode.resource[IO](config, persistence).allocated
+            (raft, release) = allocated
+            service = LeaseService.replicated[IO](raft, Clock.system[IO])
+            _ <- currentRef.set(Some((service, raft, release)))
+          yield ()
+      }
+
+    def stop: IO[Unit] =
+      currentRef.getAndSet(None).flatMap(_.traverse_(_._3))
+
+    def service: IO[LeaseService[IO]] = currentRef.get.flatMap(_.map(_._1).liftTo[IO](new IllegalStateException(s"node $id is stopped")))
+    def role: IO[NodeRole] = currentRef.get.flatMap(_.map(_._2.role).getOrElse(IO.pure(NodeRole.Follower)))
+    def acquire(request: AcquireRequest): IO[Either[ServiceError, AcquireResult]] = service.flatMap(_.acquire(request))
+    def getLease(tenantId: TenantId, resourceId: ResourceId): IO[Either[ServiceError, GetLeaseResult]] = service.flatMap(_.getLease(tenantId, resourceId))

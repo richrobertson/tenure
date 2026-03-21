@@ -341,8 +341,8 @@ private final case class ReplicatedLeaseService[F[_]: Concurrent](raftNode: Raft
     )
 
   override def getLease(tenantId: TenantId, resourceId: ResourceId): F[Either[ServiceError, GetLeaseResult]] =
-    raftNode.role.flatMap {
-      case NodeRole.Leader =>
+    raftNode.canServeLeaderReads.flatMap { authoritative =>
+      if authoritative then
         clock.now.flatMap { now =>
           raftNode.readState.map { current =>
             val resourceKey = ResourceKey(tenantId, resourceId)
@@ -351,16 +351,16 @@ private final case class ReplicatedLeaseService[F[_]: Concurrent](raftNode: Raft
               case None         => Right(GetLeaseResult(found = false, lease = LeaseView.absent(resourceKey)))
           }
         }
-      case _ => raftNode.leaderHint.map(hint => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not the leader", hint)))
+      else raftNode.leaderHint.map(hint => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not authoritative for reads", hint)))
     }
 
   override def listLeases(tenantId: TenantId): F[Either[ServiceError, ListLeasesResult]] =
-    raftNode.role.flatMap {
-      case NodeRole.Leader =>
+    raftNode.canServeLeaderReads.flatMap { authoritative =>
+      if authoritative then
         clock.now.flatMap { now =>
           raftNode.readState.map { current =>
             Right(ListLeasesResult(current.leaseState.leases.values.toList.filter(_.resourceKey.tenantId == tenantId).sortBy(_.resourceKey.resourceId.value).map(LeaseView.fromRecord(_, now))))
           }
         }
-      case _ => raftNode.leaderHint.map(hint => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not the leader", hint)))
+      else raftNode.leaderHint.map(hint => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not authoritative for reads", hint)))
     }

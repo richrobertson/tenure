@@ -4,6 +4,7 @@ import cats.effect.kernel.{Async, Resource, Temporal}
 import cats.effect.std.Mutex
 import cats.effect.{Fiber, Ref}
 import cats.syntax.all.*
+import com.richrobertson.tenure.model.LeaseView
 import com.richrobertson.tenure.persistence.RaftPersistence
 import com.richrobertson.tenure.service.*
 import io.circe.Codec
@@ -37,6 +38,7 @@ final case class AppendEntriesRequest(term: Long, leaderId: String, prevLogIndex
 final case class AppendEntriesResponse(term: Long, success: Boolean, matchIndex: Long) derives CanEqual
 final case class VoteRequest(term: Long, candidateId: String, lastLogIndex: Long, lastLogTerm: Long) derives CanEqual
 final case class VoteResponse(term: Long, voteGranted: Boolean) derives CanEqual
+final case class PeerProgress(nextIndex: Long, matchIndex: Long) derives CanEqual
 
 enum PeerMessage derives CanEqual:
   case AppendEntries(request: AppendEntriesRequest)
@@ -57,7 +59,6 @@ object PeerMessage:
   given Codec[AcquireResult] = deriveCodec
   given Codec[RenewResult] = deriveCodec
   given Codec[ReleaseResult] = deriveCodec
-
   given Codec[ServiceError] = Codec.from(serviceErrorDecoder, serviceErrorEncoder)
   given Codec[ReplicatedCommand] = Codec.from(commandDecoder, commandEncoder)
   given Codec[StoredResult] = Codec.from(storedResultDecoder, storedResultEncoder)
@@ -76,12 +77,12 @@ object PeerMessage:
   }
 
   private val serviceErrorEncoder: Encoder[ServiceError] = Encoder.instance {
-    case ServiceError.InvalidRequest(message) => Json.obj("type" -> Json.fromString("invalid_request"), "message" -> Json.fromString(message))
-    case ServiceError.AlreadyHeld(message)    => Json.obj("type" -> Json.fromString("already_held"), "message" -> Json.fromString(message))
-    case ServiceError.LeaseExpired(message)   => Json.obj("type" -> Json.fromString("lease_expired"), "message" -> Json.fromString(message))
-    case ServiceError.LeaseMismatch(message)  => Json.obj("type" -> Json.fromString("lease_mismatch"), "message" -> Json.fromString(message))
-    case ServiceError.NotFound(message)       => Json.obj("type" -> Json.fromString("not_found"), "message" -> Json.fromString(message))
-    case ServiceError.NotLeader(message, leaderHint) => Json.obj("type" -> Json.fromString("not_leader"), "message" -> Json.fromString(message), "leader_hint" -> leaderHint.asJson)
+    case ServiceError.InvalidRequest(message)         => Json.obj("type" -> Json.fromString("invalid_request"), "message" -> Json.fromString(message))
+    case ServiceError.AlreadyHeld(message)            => Json.obj("type" -> Json.fromString("already_held"), "message" -> Json.fromString(message))
+    case ServiceError.LeaseExpired(message)           => Json.obj("type" -> Json.fromString("lease_expired"), "message" -> Json.fromString(message))
+    case ServiceError.LeaseMismatch(message)          => Json.obj("type" -> Json.fromString("lease_mismatch"), "message" -> Json.fromString(message))
+    case ServiceError.NotFound(message)               => Json.obj("type" -> Json.fromString("not_found"), "message" -> Json.fromString(message))
+    case ServiceError.NotLeader(message, leaderHint)  => Json.obj("type" -> Json.fromString("not_leader"), "message" -> Json.fromString(message), "leader_hint" -> leaderHint.asJson)
   }
 
   private val commandDecoder: Decoder[ReplicatedCommand] = Decoder.instance { cursor =>
@@ -140,8 +141,46 @@ final case class RaftRuntimeState(
     commitIndex: Long,
     lastApplied: Long,
     materialized: ServiceState,
-    lastHeartbeatMillis: Long
+    lastHeartbeatMillis: Long,
+    lastQuorumAckMillis: Long,
+    peerProgress: Map[String, PeerProgress]
 ) derives CanEqual
+
+object RaftTransitions:
+  def handleVoteRequest(state: RaftRuntimeState, request: VoteRequest, now: Long): (RaftRuntimeState, VoteResponse) =
+    if request.term < state.currentTerm then state -> VoteResponse(state.currentTerm, voteGranted = false)
+    else
+      val termAdjusted =
+        if request.term > state.currentTerm then state.copy(currentTerm = request.term, votedFor = None, role = NodeRole.Follower, leaderId = None)
+        else state
+      val localLast = termAdjusted.log.lastOption
+      val upToDate = request.lastLogTerm > localLast.map(_.term).getOrElse(0L) ||
+        (request.lastLogTerm == localLast.map(_.term).getOrElse(0L) && request.lastLogIndex >= localLast.map(_.index).getOrElse(0L))
+      val canVote = termAdjusted.votedFor.forall(_ == request.candidateId)
+      val granted = canVote && upToDate
+      val next = if granted then termAdjusted.copy(votedFor = Some(request.candidateId), lastHeartbeatMillis = now) else termAdjusted.copy(lastHeartbeatMillis = now)
+      next -> VoteResponse(next.currentTerm, granted)
+
+  def handleAppendEntries(state: RaftRuntimeState, request: AppendEntriesRequest, now: Long): (RaftRuntimeState, AppendEntriesResponse) =
+    if request.term < state.currentTerm then state -> AppendEntriesResponse(state.currentTerm, success = false, state.log.lastOption.map(_.index).getOrElse(0L))
+    else
+      val base =
+        if request.term > state.currentTerm then
+          state.copy(currentTerm = request.term, role = NodeRole.Follower, leaderId = Some(request.leaderId), votedFor = None, lastHeartbeatMillis = now)
+        else
+          state.copy(role = NodeRole.Follower, leaderId = Some(request.leaderId), lastHeartbeatMillis = now)
+      val prevMatches =
+        if request.prevLogIndex == 0 then true
+        else base.log.lift((request.prevLogIndex - 1).toInt).exists(_.term == request.prevLogTerm)
+      if !prevMatches then base -> AppendEntriesResponse(base.currentTerm, success = false, base.log.lastOption.map(_.index).getOrElse(0L))
+      else
+        val prefix = base.log.take(request.prevLogIndex.toInt)
+        val nextLog = if request.entries.isEmpty then base.log else prefix ++ request.entries
+        val cappedCommit = math.min(request.leaderCommit, nextLog.lastOption.map(_.index).getOrElse(base.commitIndex))
+        val entriesToApply = nextLog.filter(entry => entry.index > base.lastApplied && entry.index <= cappedCommit).sortBy(_.index)
+        val materialized = entriesToApply.foldLeft(base.materialized) { case (acc, entry) => LeaseMaterializer.applyCommand(acc, entry.command) }
+        val next = base.copy(log = nextLog, commitIndex = cappedCommit, lastApplied = math.max(base.lastApplied, cappedCommit), materialized = materialized)
+        next -> AppendEntriesResponse(next.currentTerm, success = true, next.log.lastOption.map(_.index).getOrElse(0L))
 
 trait RaftNode[F[_]]:
   def nodeId: String
@@ -149,11 +188,12 @@ trait RaftNode[F[_]]:
   def role: F[NodeRole]
   def leaderHint: F[Option[String]]
   def readState: F[ServiceState]
+  def canServeLeaderReads: F[Boolean]
   def shutdown: F[Unit]
 
 object RaftNode:
   def resource[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F]): Resource[F, RaftNode[F]] =
-    Resource.make(create(config, persistence))(_.shutdown).map(identity)
+    Resource.make(create(config, persistence))(_.shutdown).widen
 
   private def create[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F]): F[LiveRaftNode[F]] =
     for
@@ -169,7 +209,9 @@ object RaftNode:
           commitIndex = persisted.metadata.commitIndex,
           lastApplied = persisted.metadata.commitIndex,
           materialized = replayCommitted(persisted.entries, persisted.metadata.commitIndex),
-          lastHeartbeatMillis = nowMillis
+          lastHeartbeatMillis = nowMillis,
+          lastQuorumAckMillis = 0L,
+          peerProgress = Map.empty
         )
       )
       mutex <- Mutex[F]
@@ -197,6 +239,7 @@ private final class LiveRaftNode[F[_]: Async](
   private val electionMin = 400.millis
   private val electionMax = 650.millis
   private val heartbeatInterval = 150.millis
+  private val quorumLeaseTimeout = 900.millis
 
   def start: F[Unit] =
     for
@@ -206,7 +249,7 @@ private final class LiveRaftNode[F[_]: Async](
       _ <- fibersRef.set(List(serverFiber, electionFiber, heartbeatFiber))
     yield ()
 
-  def shutdown: F[Unit] =
+  override def shutdown: F[Unit] =
     for
       server <- serverRef.get
       _ <- server.traverse_(socket => Async[F].blocking(socket.close()).handleError(_ => ()))
@@ -216,18 +259,18 @@ private final class LiveRaftNode[F[_]: Async](
 
   override def submit(command: ReplicatedCommand): F[Either[NotLeader, StoredResult]] =
     mutex.lock.surround {
-      stateRef.get.flatMap { state =>
-        if state.role != NodeRole.Leader then leaderHint.map(NotLeader.apply).map(_.asLeft[StoredResult])
-        else
-          val entry = RaftLogEntry(state.log.size.toLong + 1L, state.currentTerm, command)
+      assertLeaderAuthority.flatMap {
+        case Left(notLeader) => notLeader.asLeft[StoredResult].pure[F]
+        case Right(leaderState) =>
+          val entry = RaftLogEntry(leaderState.log.size.toLong + 1L, leaderState.currentTerm, command)
           for
             _ <- persistence.appendEntry(entry)
             _ <- stateRef.update(current => current.copy(log = current.log :+ entry))
-            afterAppend <- stateRef.get
-            replicated <- replicateEntry(afterAppend, entry)
+            updated <- stateRef.get
+            replication <- replicateToQuorum(updated)
             result <-
-              if replicated then commitThrough(entry.index) *> readCommittedResult(command.requestContext)
-              else NotLeader(afterAppend.leaderId.flatMap(config.leaderHintEndpoint)).asLeft[StoredResult].pure[F]
+              if replication.authoritative then readCommittedResult(command.requestContext)
+              else stepDown(updated.currentTerm, None) *> NotLeader(updated.leaderId.flatMap(config.leaderHintEndpoint)).asLeft[StoredResult].pure[F]
           yield result
       }
     }
@@ -235,6 +278,22 @@ private final class LiveRaftNode[F[_]: Async](
   override def role: F[NodeRole] = stateRef.get.map(_.role)
   override def leaderHint: F[Option[String]] = stateRef.get.map(_.leaderId.flatMap(config.leaderHintEndpoint))
   override def readState: F[ServiceState] = stateRef.get.map(_.materialized)
+
+  override def canServeLeaderReads: F[Boolean] =
+    stateRef.get.flatMap(canServeLeaderReadsFromState)
+
+  private def canServeLeaderReadsFromState(state: RaftRuntimeState): F[Boolean] =
+    Temporal[F].realTime.map(_.toMillis).map { now =>
+      state.role == NodeRole.Leader && (config.raftPeers.size == 1 || now - state.lastQuorumAckMillis <= quorumLeaseTimeout.toMillis)
+    }
+
+  private def assertLeaderAuthority: F[Either[NotLeader, RaftRuntimeState]] =
+    stateRef.get.flatMap { state =>
+      canServeLeaderReadsFromState(state).map { ready =>
+        if state.role == NodeRole.Leader && ready then Right(state)
+        else Left(NotLeader(state.leaderId.flatMap(config.leaderHintEndpoint)))
+      }
+    }
 
   private def serverLoop: F[Unit] =
     Async[F].blocking {
@@ -255,21 +314,36 @@ private final class LiveRaftNode[F[_]: Async](
   private def electionLoop: F[Unit] =
     randomElectionTimeout.flatMap(Temporal[F].sleep) *> stateRef.get.flatMap { state =>
       Temporal[F].realTime.map(_.toMillis).flatMap { now =>
-        if state.role == NodeRole.Leader || now - state.lastHeartbeatMillis < electionMin.toMillis then electionLoop
+        val recentlyHeardLeader = now - state.lastHeartbeatMillis < electionMin.toMillis
+        if state.role == NodeRole.Leader || recentlyHeardLeader then electionLoop
         else startElection *> electionLoop
       }
     }
 
   private def heartbeatLoop: F[Unit] =
     Temporal[F].sleep(heartbeatInterval) *> stateRef.get.flatMap { state =>
-      (if state.role == NodeRole.Leader then broadcastHeartbeat(state) else Async[F].unit) *> heartbeatLoop
+      val tick =
+        if state.role == NodeRole.Leader then
+          replicateToQuorum(state).flatMap { result =>
+            if result.authoritative then Async[F].unit
+            else stepDown(state.currentTerm, None)
+          }
+        else Async[F].unit
+      tick *> heartbeatLoop
     }
 
   private def startElection: F[Unit] =
     mutex.lock.surround {
       for
+        now <- Temporal[F].realTime.map(_.toMillis)
         candidate <- stateRef.modify { state =>
-          val next = state.copy(currentTerm = state.currentTerm + 1L, votedFor = Some(config.nodeId), role = NodeRole.Candidate, leaderId = None)
+          val next = state.copy(
+            currentTerm = state.currentTerm + 1L,
+            votedFor = Some(config.nodeId),
+            role = NodeRole.Candidate,
+            leaderId = None,
+            lastHeartbeatMillis = now
+          )
           next -> next
         }
         _ <- persistence.saveMetadata(PersistedMetadata(candidate.currentTerm, candidate.votedFor, candidate.commitIndex))
@@ -283,10 +357,81 @@ private final class LiveRaftNode[F[_]: Async](
           }
         }
         _ <-
-          if 1 + votes.count(identity) >= config.majority then stateRef.update(_.copy(role = NodeRole.Leader, leaderId = Some(config.nodeId)))
+          if 1 + votes.count(identity) >= config.majority then becomeLeader(now)
           else Async[F].unit
       yield ()
     }
+
+  private def becomeLeader(nowMillis: Long): F[Unit] =
+    stateRef.update { state =>
+      val lastLogIndex = state.log.lastOption.map(_.index).getOrElse(0L)
+      val progress = config.raftPeers.filterNot(_.nodeId == config.nodeId).map { peer =>
+        peer.nodeId -> PeerProgress(nextIndex = lastLogIndex + 1L, matchIndex = 0L)
+      }.toMap
+      state.copy(
+        role = NodeRole.Leader,
+        leaderId = Some(config.nodeId),
+        lastQuorumAckMillis = nowMillis,
+        peerProgress = progress
+      )
+    }
+
+  private final case class ReplicationOutcome(authoritative: Boolean)
+
+  private def replicateToQuorum(initialState: RaftRuntimeState): F[ReplicationOutcome] =
+    for
+      outcomes <- config.raftPeers.filterNot(_.nodeId == config.nodeId).traverse(peer => replicateToPeer(initialState.currentTerm, peer))
+      current <- stateRef.get
+      majorityMatchedIndex = computeCommittedIndex(current)
+      _ <- if majorityMatchedIndex > current.commitIndex then commitThrough(majorityMatchedIndex) else Async[F].unit
+      now <- Temporal[F].realTime.map(_.toMillis)
+      successes = outcomes.count(identity) + 1
+      _ <-
+        if successes >= config.majority then stateRef.update(_.copy(lastQuorumAckMillis = now))
+        else Async[F].unit
+      refreshed <- stateRef.get
+      authoritative <- canServeLeaderReadsFromState(refreshed)
+    yield ReplicationOutcome(authoritative)
+
+  private def replicateToPeer(term: Long, peer: PeerNode): F[Boolean] =
+    stateRef.get.flatMap { state =>
+      state.peerProgress.get(peer.nodeId) match
+        case None => false.pure[F]
+        case Some(progress) => syncPeer(term, peer, progress)
+    }
+
+  private def syncPeer(term: Long, peer: PeerNode, progress: PeerProgress): F[Boolean] =
+    stateRef.get.flatMap { state =>
+      if state.role != NodeRole.Leader || term != state.currentTerm then false.pure[F]
+      else
+        val nextIndex = math.max(1L, progress.nextIndex)
+        val prevLogIndex = nextIndex - 1L
+        val prevLogTerm =
+          if prevLogIndex == 0 then 0L
+          else state.log.lift((prevLogIndex - 1L).toInt).map(_.term).getOrElse(0L)
+        val suffix = state.log.drop((nextIndex - 1L).toInt)
+        val request = AppendEntriesRequest(state.currentTerm, config.nodeId, prevLogIndex, prevLogTerm, suffix, state.commitIndex)
+        send(peer, PeerMessage.AppendEntries(request)).attempt.flatMap {
+          case Right(PeerMessage.AppendEntriesAck(response)) if response.term > state.currentTerm =>
+            stepDown(response.term, Some(peer.nodeId)).as(false)
+          case Right(PeerMessage.AppendEntriesAck(response)) if response.success =>
+            val matched = response.matchIndex
+            stateRef.update { current =>
+              val updated = PeerProgress(nextIndex = matched + 1L, matchIndex = matched)
+              current.copy(peerProgress = current.peerProgress.updated(peer.nodeId, updated))
+            }.as(true)
+          case Right(PeerMessage.AppendEntriesAck(_)) if nextIndex > 1L =>
+            stateRef.update(current => current.copy(peerProgress = current.peerProgress.updated(peer.nodeId, progress.copy(nextIndex = nextIndex - 1L)))).flatMap(_ =>
+              syncPeer(term, peer, progress.copy(nextIndex = nextIndex - 1L))
+            )
+          case _ => false.pure[F]
+        }
+    }
+
+  private def computeCommittedIndex(state: RaftRuntimeState): Long =
+    val matchIndexes = state.peerProgress.values.map(_.matchIndex).toList :+ state.log.lastOption.map(_.index).getOrElse(0L)
+    val candidates = matchIndexes.sorted
+    candidates.drop(candidates.size - config.majority).headOption.getOrElse(0L)
 
   private def commitThrough(index: Long): F[Unit] =
     for
@@ -297,31 +442,11 @@ private final class LiveRaftNode[F[_]: Async](
         next -> next
       }
       _ <- persistence.saveMetadata(PersistedMetadata(updated.currentTerm, updated.votedFor, updated.commitIndex))
-      _ <- broadcastHeartbeat(updated)
     yield ()
 
   private def readCommittedResult(requestContext: RequestContext): F[Either[NotLeader, StoredResult]] =
     stateRef.get.map { state =>
       state.materialized.responses.get((requestContext.tenantId, requestContext.requestId)).map(_.result).toRight(NotLeader(state.leaderId.flatMap(config.leaderHintEndpoint)))
-    }
-
-  private def replicateEntry(state: RaftRuntimeState, entry: RaftLogEntry): F[Boolean] =
-    config.raftPeers.filterNot(_.nodeId == config.nodeId).traverse { peer =>
-      val prev = if entry.index <= 1 then None else state.log.lift((entry.index - 2).toInt)
-      val request = AppendEntriesRequest(state.currentTerm, config.nodeId, prev.map(_.index).getOrElse(0L), prev.map(_.term).getOrElse(0L), Vector(entry), state.commitIndex)
-      send(peer, PeerMessage.AppendEntries(request)).attempt.flatMap {
-        case Right(PeerMessage.AppendEntriesAck(response)) =>
-          if response.term > state.currentTerm then stepDown(response.term, Some(peer.nodeId)).as(false)
-          else response.success.pure[F]
-        case _ => false.pure[F]
-      }
-    }.map(acks => 1 + acks.count(identity) >= config.majority)
-
-  private def broadcastHeartbeat(state: RaftRuntimeState): F[Unit] =
-    config.raftPeers.filterNot(_.nodeId == config.nodeId).traverse_ { peer =>
-      val last = state.log.lastOption
-      val request = AppendEntriesRequest(state.currentTerm, config.nodeId, last.map(_.index).getOrElse(0L), last.map(_.term).getOrElse(0L), Vector.empty, state.commitIndex)
-      send(peer, PeerMessage.AppendEntries(request)).attempt.void
     }
 
   private def handleSocket(socket: Socket): F[Unit] =
@@ -349,18 +474,7 @@ private final class LiveRaftNode[F[_]: Async](
     mutex.lock.surround {
       for
         now <- Temporal[F].realTime.map(_.toMillis)
-        response <- stateRef.modify { state =>
-          if request.term < state.currentTerm then state -> VoteResponse(state.currentTerm, voteGranted = false)
-          else
-            val termAdjusted = if request.term > state.currentTerm then state.copy(currentTerm = request.term, votedFor = None, role = NodeRole.Follower, leaderId = None) else state
-            val localLast = termAdjusted.log.lastOption
-            val upToDate = request.lastLogTerm > localLast.map(_.term).getOrElse(0L) ||
-              (request.lastLogTerm == localLast.map(_.term).getOrElse(0L) && request.lastLogIndex >= localLast.map(_.index).getOrElse(0L))
-            val canVote = termAdjusted.votedFor.forall(_ == request.candidateId)
-            val granted = canVote && upToDate
-            val next = if granted then termAdjusted.copy(votedFor = Some(request.candidateId), lastHeartbeatMillis = now) else termAdjusted.copy(lastHeartbeatMillis = now)
-            next -> VoteResponse(next.currentTerm, granted)
-        }
+        response <- stateRef.modify(state => RaftTransitions.handleVoteRequest(state, request, now))
         current <- stateRef.get
         _ <- persistence.saveMetadata(PersistedMetadata(current.currentTerm, current.votedFor, current.commitIndex))
       yield response
@@ -370,23 +484,7 @@ private final class LiveRaftNode[F[_]: Async](
     mutex.lock.surround {
       for
         now <- Temporal[F].realTime.map(_.toMillis)
-        response <- stateRef.modify { state =>
-          if request.term < state.currentTerm then state -> AppendEntriesResponse(state.currentTerm, success = false, state.log.lastOption.map(_.index).getOrElse(0L))
-          else
-            val base = state.copy(currentTerm = request.term, role = NodeRole.Follower, leaderId = Some(request.leaderId), votedFor = None, lastHeartbeatMillis = now)
-            val prevMatches =
-              if request.prevLogIndex == 0 then true
-              else base.log.lift((request.prevLogIndex - 1).toInt).exists(_.term == request.prevLogTerm)
-            if !prevMatches then base -> AppendEntriesResponse(base.currentTerm, success = false, base.log.lastOption.map(_.index).getOrElse(0L))
-            else
-              val prefix = base.log.take(request.prevLogIndex.toInt)
-              val nextLog = prefix ++ request.entries
-              val cappedCommit = math.min(request.leaderCommit, nextLog.lastOption.map(_.index).getOrElse(base.commitIndex))
-              val entriesToApply = nextLog.filter(entry => entry.index > base.lastApplied && entry.index <= cappedCommit).sortBy(_.index)
-              val materialized = entriesToApply.foldLeft(base.materialized) { case (acc, entry) => LeaseMaterializer.applyCommand(acc, entry.command) }
-              val next = base.copy(log = nextLog, commitIndex = cappedCommit, lastApplied = math.max(base.lastApplied, cappedCommit), materialized = materialized)
-              next -> AppendEntriesResponse(next.currentTerm, success = true, next.log.lastOption.map(_.index).getOrElse(0L))
-        }
+        response <- stateRef.modify(state => RaftTransitions.handleAppendEntries(state, request, now))
         current <- stateRef.get
         _ <- persistence.overwriteEntries(current.log)
         _ <- persistence.saveMetadata(PersistedMetadata(current.currentTerm, current.votedFor, current.commitIndex))
@@ -396,7 +494,7 @@ private final class LiveRaftNode[F[_]: Async](
   private def stepDown(term: Long, leaderId: Option[String]): F[Unit] =
     for
       now <- Temporal[F].realTime.map(_.toMillis)
-      _ <- stateRef.update(_.copy(currentTerm = term, votedFor = None, role = NodeRole.Follower, leaderId = leaderId, lastHeartbeatMillis = now))
+      _ <- stateRef.update(_.copy(currentTerm = term, role = NodeRole.Follower, leaderId = leaderId, lastHeartbeatMillis = now, lastQuorumAckMillis = 0L))
       current <- stateRef.get
       _ <- persistence.saveMetadata(PersistedMetadata(current.currentTerm, current.votedFor, current.commitIndex))
     yield ()

@@ -19,9 +19,9 @@
 - **Demo/test expectation:** Scripted demo showing one tenant, multiple resources, fake-clock expiry and renewal boundary tests, rejection of invalid TTLs, tenant-scoped behavior, and local startup of the single-node HTTP prototype without any clustering or DNS assumption.
 - **Done means:** A single-node service enforces the documented lease contract with deterministic tests, fake-clock time control, no hidden time dependencies, and a runtime model that does not assume Kubernetes or external discovery.
 
-## Milestone 2: embedded Raft integration and replicated lease log *(complete)*
+## Milestone 2: embedded Raft integration and replicated lease log *(in progress)*
 
-Milestone 2 is complete in the current prototype. The repo now includes one shared Raft group, replicated mutating lease commands, leader election and `NOT_LEADER` handling, static-config bootstrap, local disk persistence for Raft metadata/log entries, restart replay, and direct TCP peer RPCs without multiplexing.
+Milestone 2 remains in progress in the current prototype. The repo includes one shared Raft group, replicated mutating lease commands, leader election and `NOT_LEADER` handling, static-config bootstrap, local disk persistence for Raft metadata/log entries, restart replay paths, and direct TCP peer RPCs without multiplexing, but milestone completion should not be claimed until the automated test suite is run successfully.
 
 - **Objective:** Introduce embedded Raft and replicate mutating lease commands through one shared group.
 - **Deliverables:** Single-group Raft integration, command replication path, explicit follower `NOT_LEADER` behavior for reads and writes, local durable metadata/log persistence, and static-config bootstrap over direct TCP peer endpoints.
