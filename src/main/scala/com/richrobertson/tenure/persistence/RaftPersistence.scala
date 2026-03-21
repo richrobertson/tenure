@@ -2,7 +2,8 @@ package com.richrobertson.tenure.persistence
 
 import cats.effect.Sync
 import cats.syntax.all.*
-import com.richrobertson.tenure.raft.{PersistedMetadata, PersistedNodeState, RaftLogEntry}
+import com.richrobertson.tenure.raft.{PersistedMetadata, PersistedNodeState, PersistedSnapshot, RaftLogEntry}
+import com.richrobertson.tenure.service.ServiceState
 import io.circe.Codec
 import io.circe.parser.decode
 import io.circe.syntax.*
@@ -14,25 +15,29 @@ trait RaftPersistence[F[_]]:
   def saveMetadata(metadata: PersistedMetadata): F[Unit]
   def appendEntry(entry: RaftLogEntry): F[Unit]
   def overwriteEntries(entries: Vector[RaftLogEntry]): F[Unit]
+  def loadSnapshot: F[Option[PersistedSnapshot]]
+  def saveSnapshot(snapshot: PersistedSnapshot): F[Unit]
 
 object RaftPersistence:
-  def fileBacked[F[_]: Sync](dataDir: String)(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry]): F[RaftPersistence[F]] =
+  def fileBacked[F[_]: Sync](dataDir: String)(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]): F[RaftPersistence[F]] =
     Sync[F].delay {
       val root = Paths.get(dataDir)
       Files.createDirectories(root)
       new FileBackedRaftPersistence[F](root)
     }
 
-private final class FileBackedRaftPersistence[F[_]: Sync](root: Path)(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry]) extends RaftPersistence[F]:
+private final class FileBackedRaftPersistence[F[_]: Sync](root: Path)(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]) extends RaftPersistence[F]:
   private val metadataPath = root.resolve("metadata.json")
   private val logPath = root.resolve("log.jsonl")
+  private val snapshotPath = root.resolve("snapshot.json")
 
   override def load: F[PersistedNodeState] =
     for
       _ <- ensureFiles
       metadata <- readMetadata
       entries <- readEntries
-    yield PersistedNodeState(metadata, entries)
+      snapshot <- readSnapshot
+    yield PersistedNodeState(metadata, snapshot, entries)
 
   override def saveMetadata(metadata: PersistedMetadata): F[Unit] =
     writeString(metadataPath, metadata.asJson.spaces2)
@@ -52,11 +57,21 @@ private final class FileBackedRaftPersistence[F[_]: Sync](root: Path)(using Code
   override def overwriteEntries(entries: Vector[RaftLogEntry]): F[Unit] =
     writeString(logPath, entries.map(_.asJson.noSpaces).mkString("", "\n", if entries.isEmpty then "" else "\n"))
 
+  override def loadSnapshot: F[Option[PersistedSnapshot]] =
+    for
+      _ <- ensureFiles
+      snapshot <- readSnapshot
+    yield snapshot
+
+  override def saveSnapshot(snapshot: PersistedSnapshot): F[Unit] =
+    writeString(snapshotPath, snapshot.asJson.spaces2)
+
   private def ensureFiles: F[Unit] =
     Sync[F].blocking {
       Files.createDirectories(root)
       if !Files.exists(metadataPath) then Files.writeString(metadataPath, PersistedMetadata.initial.asJson.spaces2, StandardCharsets.UTF_8)
       if !Files.exists(logPath) then Files.writeString(logPath, "", StandardCharsets.UTF_8)
+      if !Files.exists(snapshotPath) then Files.writeString(snapshotPath, "", StandardCharsets.UTF_8)
     }
 
   private def readMetadata: F[PersistedMetadata] =
@@ -67,6 +82,13 @@ private final class FileBackedRaftPersistence[F[_]: Sync](root: Path)(using Code
   private def readEntries: F[Vector[RaftLogEntry]] =
     Sync[F].blocking(Files.readAllLines(logPath, StandardCharsets.UTF_8)).flatMap { lines =>
       lines.toArray.toVector.map(_.toString.trim).filter(_.nonEmpty).traverse(line => Sync[F].fromEither(decode[RaftLogEntry](line)))
+    }
+
+  private def readSnapshot: F[Option[PersistedSnapshot]] =
+    Sync[F].blocking(Files.readString(snapshotPath, StandardCharsets.UTF_8)).flatMap { raw =>
+      val content = raw.trim
+      if content.isEmpty then Sync[F].pure(None)
+      else Sync[F].fromEither(decode[PersistedSnapshot](content)).map(Some.apply)
     }
 
   private def writeString(path: Path, value: String): F[Unit] =

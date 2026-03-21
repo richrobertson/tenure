@@ -15,6 +15,7 @@ class RaftTransitionsSpec extends FunSuite:
     role = NodeRole.Follower,
     leaderId = None,
     log = Vector.empty,
+    snapshot = None,
     commitIndex = 0L,
     lastApplied = 0L,
     materialized = ServiceState.empty,

@@ -52,7 +52,9 @@ Milestone 4 is complete. The repo now includes tenant-scoped request deduplicati
 - **Demo/test expectation:** Scripted demo shows quota failures, idempotent transport retries, duplicate `request_id` rejection across mismatched targets, deterministic replay of original results, and downstream rejection of stale tokens.
 - **Done means:** Tenant isolation, dedupe semantics, quotas, and fencing behavior are externally visible and proven by replay and stale-writer rejection tests.
 
-## Milestone 5: persistence, crash recovery, snapshots
+## Milestone 5: persistence, crash recovery, snapshots *(complete)*
+
+Milestone 5 is complete. The repo now persists Raft term/vote/commit/application metadata, writes explicit state-machine snapshots, restores materialized lease state from snapshot plus remaining log suffix, and compacts committed log prefixes after safe local snapshots. Deterministic tests cover restart/replay correctness, dedupe preservation, fencing-token progression, tenant quota reconstruction, snapshot inspection, compaction, and restarted leader/follower behavior using only local disk, local config, and peer TCP connectivity.
 
 - **Objective:** Persist enough state for durable recovery and controlled log growth.
 - **Deliverables:** Persisted Raft metadata/log, state-machine snapshots, recovery procedure, and compaction strategy.

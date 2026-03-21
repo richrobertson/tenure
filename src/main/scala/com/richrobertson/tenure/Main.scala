@@ -5,6 +5,7 @@ import com.richrobertson.tenure.api.LeaseRoutes
 import com.richrobertson.tenure.persistence.RaftPersistence
 import com.richrobertson.tenure.raft.{ClusterConfig, RaftNode}
 import com.richrobertson.tenure.service.LeaseService
+import com.richrobertson.tenure.service.ServiceCodecs.given
 import com.richrobertson.tenure.time.Clock
 import io.circe.parser.decode
 import org.http4s.ember.server.EmberServerBuilder
