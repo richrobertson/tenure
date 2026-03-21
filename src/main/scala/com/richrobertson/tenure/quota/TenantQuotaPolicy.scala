@@ -1,8 +1,13 @@
 package com.richrobertson.tenure.quota
 
 import com.richrobertson.tenure.model.TenantId
+import io.circe.Codec
+import io.circe.generic.semiauto.deriveCodec
 
 final case class TenantQuotaPolicy(maxActiveLeases: Int, maxTtlSeconds: Long) derives CanEqual
+object TenantQuotaPolicy:
+  given Codec[TenantQuotaPolicy] = deriveCodec
+
 
 final case class TenantQuotaRegistry(defaultPolicy: TenantQuotaPolicy, tenantOverrides: Map[TenantId, TenantQuotaPolicy]) derives CanEqual:
   def policyFor(tenantId: TenantId): TenantQuotaPolicy = tenantOverrides.getOrElse(tenantId, defaultPolicy)

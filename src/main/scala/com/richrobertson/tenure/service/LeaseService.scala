@@ -5,7 +5,7 @@ import cats.effect.std.Mutex
 import cats.syntax.all.*
 import com.richrobertson.tenure.auth.{Authorization, Principal}
 import com.richrobertson.tenure.model.*
-import com.richrobertson.tenure.quota.{QuotaDecision, TenantQuotaPolicy, TenantQuotaRegistry}
+import com.richrobertson.tenure.quota.{TenantQuotaPolicy, TenantQuotaRegistry}
 import com.richrobertson.tenure.raft.RaftNode
 import com.richrobertson.tenure.statemachine.{LeaseState, LeaseStateMachine}
 import com.richrobertson.tenure.time.Clock
@@ -76,6 +76,7 @@ final case class AcquireCommand(
     holderId: ClientId,
     ttlSeconds: Long,
     leaseId: LeaseId,
+    quotaPolicy: TenantQuotaPolicy,
     appliedAt: Instant
 ) extends ReplicatedCommand derives CanEqual:
   def fingerprint: RequestFingerprint =
@@ -86,6 +87,7 @@ final case class RenewCommand(
     leaseId: LeaseId,
     holderId: ClientId,
     ttlSeconds: Long,
+    quotaPolicy: TenantQuotaPolicy,
     appliedAt: Instant
 ) extends ReplicatedCommand derives CanEqual:
   def fingerprint: RequestFingerprint =
@@ -101,14 +103,13 @@ final case class ReleaseCommand(
     RequestFingerprint(RequestOperation.Release, requestContext.resourceKey, holderId, Some(leaseId), None)
 
 object LeaseMaterializer:
-  def applyCommand(state: ServiceState, command: ReplicatedCommand, quotas: TenantQuotaRegistry): ServiceState =
+  def applyCommand(state: ServiceState, command: ReplicatedCommand): ServiceState =
     command match
       case command: AcquireCommand =>
         handleCommand(state, command.requestContext, command.fingerprint, StoredResult.Acquire.apply) {
-          val policy = quotas.policyFor(command.requestContext.tenantId)
-          quotas.validateTtl(policy, command.requestContext.tenantId, command.ttlSeconds).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
+          TenantQuotaRegistry.default.validateTtl(command.quotaPolicy, command.requestContext.tenantId, command.ttlSeconds).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
             val activeCount = state.leaseState.activeLeaseCount(command.requestContext.tenantId, command.appliedAt)
-            quotas.validateActiveLeases(policy, command.requestContext.tenantId, activeCount).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
+            TenantQuotaRegistry.default.validateActiveLeases(command.quotaPolicy, command.requestContext.tenantId, activeCount).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
               LeaseStateMachine.transition(
                 state.leaseState,
                 com.richrobertson.tenure.model.Acquire(command.requestContext.resourceKey, command.holderId, command.ttlSeconds, command.leaseId),
@@ -124,8 +125,7 @@ object LeaseMaterializer:
 
       case command: RenewCommand =>
         handleCommand(state, command.requestContext, command.fingerprint, StoredResult.Renew.apply) {
-          val policy = quotas.policyFor(command.requestContext.tenantId)
-          quotas.validateTtl(policy, command.requestContext.tenantId, command.ttlSeconds).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
+          TenantQuotaRegistry.default.validateTtl(command.quotaPolicy, command.requestContext.tenantId, command.ttlSeconds).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
             LeaseStateMachine.transition(
               state.leaseState,
               com.richrobertson.tenure.model.Renew(command.requestContext.resourceKey, command.leaseId, command.holderId, command.ttlSeconds),
@@ -299,9 +299,9 @@ private final case class LocalLeaseService[F[_]: Async](
       handleWithIdempotency(valid.requestContext, valid.fingerprint)(LeaseMaterializer.replayAcquire) {
         Async[F].delay(LeaseId.random()).flatMap { nextLeaseId =>
           clock.now.map { now =>
-            val command = AcquireCommand(valid.requestContext, valid.holderId, valid.ttlSeconds, nextLeaseId, now)
+            val command = AcquireCommand(valid.requestContext, valid.holderId, valid.ttlSeconds, nextLeaseId, quotas.policyFor(valid.requestContext.tenantId), now)
             stateRef.modify { current =>
-              val next = LeaseMaterializer.applyCommand(current, command, quotas)
+              val next = LeaseMaterializer.applyCommand(current, command)
               next -> LeaseMaterializer.replayAcquire(next.responses((valid.requestContext.tenantId, valid.requestContext.requestId)).result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))
             }
           }.flatten
@@ -313,9 +313,9 @@ private final case class LocalLeaseService[F[_]: Async](
     validateRenew(request, authorization).fold(_.asLeft[RenewResult].pure[F], valid =>
       handleWithIdempotency(valid.requestContext, valid.fingerprint)(LeaseMaterializer.replayRenew) {
         clock.now.map { now =>
-          val command = RenewCommand(valid.requestContext, valid.leaseId, valid.holderId, valid.ttlSeconds, now)
+          val command = RenewCommand(valid.requestContext, valid.leaseId, valid.holderId, valid.ttlSeconds, quotas.policyFor(valid.requestContext.tenantId), now)
           stateRef.modify { current =>
-            val next = LeaseMaterializer.applyCommand(current, command, quotas)
+            val next = LeaseMaterializer.applyCommand(current, command)
             next -> LeaseMaterializer.replayRenew(next.responses((valid.requestContext.tenantId, valid.requestContext.requestId)).result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))
           }
         }.flatten
@@ -328,7 +328,7 @@ private final case class LocalLeaseService[F[_]: Async](
         clock.now.map { now =>
           val command = ReleaseCommand(valid.requestContext, valid.leaseId, valid.holderId, now)
           stateRef.modify { current =>
-            val next = LeaseMaterializer.applyCommand(current, command, quotas)
+            val next = LeaseMaterializer.applyCommand(current, command)
             next -> LeaseMaterializer.replayRelease(next.responses((valid.requestContext.tenantId, valid.requestContext.requestId)).result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))
           }
         }.flatten
@@ -377,7 +377,7 @@ private final case class ReplicatedLeaseService[F[_]: Async](raftNode: RaftNode[
     validateAcquire(request, authorization).fold(_.asLeft[AcquireResult].pure[F], valid =>
       clock.now.flatMap(now =>
         Async[F].delay(LeaseId.random()).flatMap { nextLeaseId =>
-          raftNode.submit(AcquireCommand(valid.requestContext, valid.holderId, valid.ttlSeconds, nextLeaseId, now)).map {
+          raftNode.submit(AcquireCommand(valid.requestContext, valid.holderId, valid.ttlSeconds, nextLeaseId, quotas.policyFor(valid.requestContext.tenantId), now)).map {
             case Left(notLeader) => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not the leader", notLeader.leaderHint))
             case Right(stored) => LeaseMaterializer.replayAcquire(stored).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))
           }
@@ -388,7 +388,7 @@ private final case class ReplicatedLeaseService[F[_]: Async](raftNode: RaftNode[
   override def renew(request: RenewRequest): F[Either[ServiceError, RenewResult]] =
     validateRenew(request, authorization).fold(_.asLeft[RenewResult].pure[F], valid =>
       clock.now.flatMap(now =>
-        raftNode.submit(RenewCommand(valid.requestContext, valid.leaseId, valid.holderId, valid.ttlSeconds, now)).map {
+        raftNode.submit(RenewCommand(valid.requestContext, valid.leaseId, valid.holderId, valid.ttlSeconds, quotas.policyFor(valid.requestContext.tenantId), now)).map {
           case Left(notLeader) => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not the leader", notLeader.leaderHint))
           case Right(stored) => LeaseMaterializer.replayRenew(stored).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))
         }

@@ -1,6 +1,7 @@
 package com.richrobertson.tenure.raft
 
 import com.richrobertson.tenure.model.*
+import com.richrobertson.tenure.quota.TenantQuotaPolicy
 import com.richrobertson.tenure.service.*
 import munit.FunSuite
 import java.time.Instant
@@ -96,7 +97,7 @@ class RaftTransitionsSpec extends FunSuite:
 
   private def logEntry(index: Long, term: Long, requestId: String): RaftLogEntry =
     val uuid = UUID.fromString("00000000-0000-0000-0000-" + f"$index%012d")
-    RaftLogEntry(index, term, AcquireCommand(requestContext(requestId), ClientId("holder-1"), 30L, LeaseId(uuid), appliedAt))
+    RaftLogEntry(index, term, AcquireCommand(requestContext(requestId), ClientId("holder-1"), 30L, LeaseId(uuid), TenantQuotaPolicy(maxActiveLeases = 1000, maxTtlSeconds = 300), appliedAt))
 
   private def requestContext(requestId: String): RequestContext =
     val tenantId = TenantId("tenant-a")
