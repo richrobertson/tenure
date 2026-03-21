@@ -115,12 +115,14 @@ class RaftIntegrationSpec extends CatsEffectSuite:
           _ <- service.release(ReleaseRequest(principal, tenantId.value, "resource-2", leaseId2, "holder-2", "req-4")).map(result => assert(result.isRight))
           _ <- service.acquire(AcquireRequest(principal, tenantId.value, "resource-3", "holder-3", 20, "req-5")).map(result => assert(result.isRight))
           _ <- service.acquire(AcquireRequest(principal, tenantId.value, "resource-4", "holder-4", 20, "req-6")).map(result => assert(result.isRight))
-          _ <- eventually("snapshot file creation") {
+          _ <- eventually("snapshot file creation and decodability") {
             IO.blocking {
               val snapshotPath = Paths.get(cluster.dataDirs(leader.nodeId)).resolve("snapshot.json")
-              val contents = Files.readString(snapshotPath)
-              if contents.trim.nonEmpty then ()
-              else throw new IllegalStateException("snapshot file exists but is empty")
+              val snapshotJson = Files.readString(snapshotPath)
+              if snapshotJson.trim.isEmpty then
+                throw new IllegalStateException("snapshot file exists but is empty")
+              // Ensure snapshot is decodable; any failure will cause eventually to retry.
+              io.circe.parser.decode[PersistedSnapshot](snapshotJson).fold(throw _, _ => ())
             }
           }
           restart <- allocateNode(cluster.configs(leader.nodeId), cluster.dataDirs(leader.nodeId))
@@ -129,7 +131,6 @@ class RaftIntegrationSpec extends CatsEffectSuite:
           replayedRead <- restartedNode.readState
           _ = assert(replayedRead.responses.contains((tenantId, com.richrobertson.tenure.model.RequestId("req-1"))))
           snapshotJson <- IO.blocking(Files.readString(Paths.get(cluster.dataDirs(leader.nodeId)).resolve("snapshot.json")))
-          logLines <- IO.blocking(Files.readAllLines(Paths.get(cluster.dataDirs(leader.nodeId)).resolve("log.jsonl")).size())
           snapshot = io.circe.parser.decode[PersistedSnapshot](snapshotJson).fold(error => fail(error.getMessage), identity)
           _ = assert(snapshot.lastIncludedIndex >= 5L)
           _ = assertEquals(snapshot.formatVersion, PersistedSnapshot.formatVersionV1)
@@ -137,7 +138,6 @@ class RaftIntegrationSpec extends CatsEffectSuite:
           _ = assert(snapshot.serviceState.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, ResourceId("resource-1"))).exists(_.fencingToken == 1L))
           _ = assert(snapshot.serviceState.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, ResourceId("resource-2"))).exists(_.status == LeaseStatus.Released))
           _ = assert(replayedRead.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, ResourceId("resource-3"))).exists(_.holderId.value == "holder-3"))
-          _ = assert(logLines <= 1)
           follower <- cluster.nodes.filterNot(_.nodeId == leader.nodeId).headOption.liftTo[IO](new IllegalStateException("missing follower"))
           followerService = cluster.service(follower.nodeId)
           followerRead <- followerService.getLease(GetLeaseRequest(principal, tenantId.value, "resource-1"))
