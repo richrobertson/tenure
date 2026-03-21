@@ -90,9 +90,9 @@ class RaftIntegrationSpec extends CatsEffectSuite:
       peerPorts <- Resource.eval(List.fill(3)(freeLocalPort).sequence)
       apiPorts <- Resource.eval(List.fill(3)(freeLocalPort).sequence)
       peers = List(
-        PeerNode("node-1", "127.0.0.1", peerPorts(0)),
-        PeerNode("node-2", "127.0.0.1", peerPorts(1)),
-        PeerNode("node-3", "127.0.0.1", peerPorts(2))
+        PeerNode("node-1", "127.0.0.1", peerPorts(0), "127.0.0.1", apiPorts(0)),
+        PeerNode("node-2", "127.0.0.1", peerPorts(1), "127.0.0.1", apiPorts(1)),
+        PeerNode("node-3", "127.0.0.1", peerPorts(2), "127.0.0.1", apiPorts(2))
       )
       node1 <- TestNode.resource(ClusterConfig("node-1", "127.0.0.1", apiPorts(0), peers, root.resolve("node-1").toString))
       node2 <- TestNode.resource(ClusterConfig("node-2", "127.0.0.1", apiPorts(1), peers, root.resolve("node-2").toString))
@@ -112,7 +112,7 @@ class RaftIntegrationSpec extends CatsEffectSuite:
     def otherThan(nodeId: String): List[TestNode] = nodes.filterNot(_.id == nodeId)
 
     def awaitLeader: IO[TestNode] =
-      poll(nodes.findM(_.role.map(_ == NodeRole.Leader)))
+      poll(nodes.findM(_.isAuthoritativeLeader))
 
     def awaitLeaseReplicated(node: TestNode, tenantId: TenantId, resourceId: ResourceId): IO[Unit] =
       poll(node.hasReplicatedLease(tenantId, resourceId).map(found => Option.when(found)(())) )
@@ -152,6 +152,8 @@ class RaftIntegrationSpec extends CatsEffectSuite:
 
     def service: IO[LeaseService[IO]] = currentRef.get.flatMap(_.map(_._1).liftTo[IO](new IllegalStateException(s"node $id is stopped")))
     def role: IO[NodeRole] = currentRef.get.flatMap(_.map(_._2.role).getOrElse(IO.pure(NodeRole.Follower)))
+    def isAuthoritativeLeader: IO[Boolean] =
+      currentRef.get.flatMap(_.map(_._2.canServeLeaderReads).getOrElse(IO.pure(false)))
     def hasReplicatedLease(tenantId: TenantId, resourceId: ResourceId): IO[Boolean] =
       currentRef.get.flatMap(_.map(_._2.readState).liftTo[IO](new IllegalStateException(s"node $id is stopped"))).flatten.map { state =>
         state.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, resourceId)).isDefined
