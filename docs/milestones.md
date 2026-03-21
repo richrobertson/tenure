@@ -63,7 +63,9 @@ Milestone 5 is complete. The repo now persists Raft term/vote/commit/application
 - **Demo/test expectation:** Crash and restart tests recover authoritative lease state, dedupe history, and fencing-token progression from snapshot plus log replay, with a snapshot + log replay recovery demonstration that uses only local disk, local config, and peer connectivity.
 - **Done means:** Recovery preserves lease safety and idempotency semantics without requiring manual state reconstruction, hidden operator repair steps, or external control-plane dependencies.
 
-## Milestone 6: observability and failure-injection testing
+## Milestone 6: observability and failure-injection testing *(complete)*
+
+Milestone 6 is complete. The repo now exposes a small in-process observability surface with counters, gauges, recorded timings, and structured events; propagates request-correlation fields through lease admission and replicated command handling; and includes deterministic failure-injection validation for leader loss, persistence-path delay, retries, recovery, quota/auth denials, and local stale-writer validation artifacts.
 
 - **Objective:** Add visibility into correctness and operational behavior.
 - **Deliverables:** Metrics, structured logs, trace points, and failure-injection scenarios for leader loss, disk delays, and request retries.
