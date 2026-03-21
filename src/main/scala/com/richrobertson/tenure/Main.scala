@@ -17,10 +17,31 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 
 object Main extends IOApp:
+  private val localApiHost = "0.0.0.0"
+  private val localApiPort = 8080
+
   override def run(args: List[String]): IO[ExitCode] =
     args match
+      case Nil               => runLocal.as(ExitCode.Success)
       case configPath :: Nil => runClustered(configPath).as(ExitCode.Success)
-      case _                 => IO.println("usage: sbt 'run -- <config-path>'").as(ExitCode.Error)
+      case _                 => IO.println("usage: sbt run            # single-node local prototype\n   or: sbt 'run -- <config-path>'  # clustered mode").as(ExitCode.Error)
+
+  private def runLocal: IO[Unit] =
+    for
+      _ <- IO.println(s"starting single-node prototype on $localApiHost:$localApiPort")
+      _ <- localAppResource.use(_ => IO.never)
+    yield ()
+
+  private def localAppResource: Resource[IO, Unit] =
+    for
+      service <- Resource.eval(LeaseService.inMemory[IO](Clock.system[IO]))
+      _ <- EmberServerBuilder
+        .default[IO]
+        .withHost(com.comcast.ip4s.Host.fromString(localApiHost).get)
+        .withPort(com.comcast.ip4s.Port.fromInt(localApiPort).get)
+        .withHttpApp(LeaseRoutes.routes[IO](service).orNotFound)
+        .build
+    yield ()
 
   private def runClustered(configPath: String): IO[Unit] =
     for
