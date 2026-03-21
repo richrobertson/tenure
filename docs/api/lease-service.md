@@ -70,6 +70,7 @@ Semantics:
 - The service may reject TTLs that are too short to operate safely.
 - If the same `request_id` is retried for the same logical operation, the response must be idempotent.
 - Reusing the same `request_id` with different holder, TTL, resource, or operation semantics must be rejected.
+- A mismatched reuse must not replace the original stored result; a later exact transport retry still replays the authoritative original outcome.
 - `fencing_token` increases on each successful new grant for the resource.
 
 ## Renew

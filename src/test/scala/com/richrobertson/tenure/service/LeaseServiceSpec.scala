@@ -46,6 +46,18 @@ class LeaseServiceSpec extends CatsEffectSuite:
       second <- service.acquire(AcquireRequest(principalA, "tenant-a", "resource-1", "holder-2", 15, "req-1"))
     yield assertEquals(second.left.toOption, Some(ServiceError.InvalidRequest("request_id cannot be reused for a different operation, resource, or parameters")))
   }
+  test("mismatched request_id reuse preserves the original replayable result") {
+    for
+      clock <- TestClock.create[IO](start)
+      service <- LeaseService.inMemory[IO](clock)
+      first <- service.acquire(AcquireRequest(principalA, "tenant-a", "resource-1", "holder-1", 15, "req-1"))
+      mismatched <- service.acquire(AcquireRequest(principalA, "tenant-a", "resource-1", "holder-2", 15, "req-1"))
+      replayed <- service.acquire(AcquireRequest(principalA, "tenant-a", "resource-1", "holder-1", 15, "req-1"))
+    yield
+      assertEquals(mismatched.left.toOption, Some(ServiceError.InvalidRequest("request_id cannot be reused for a different operation, resource, or parameters")))
+      assertEquals(replayed, first)
+  }
+
 
   test("request_id reuse across different targets is rejected") {
     for

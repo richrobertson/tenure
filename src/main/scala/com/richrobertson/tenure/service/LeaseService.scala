@@ -162,7 +162,7 @@ object LeaseMaterializer:
     state.responses.get((requestContext.tenantId, requestContext.requestId)) match
       case Some(existing) if existing.fingerprint == fingerprint => state
       case Some(_) =>
-        state.copy(responses = state.responses.updated((requestContext.tenantId, requestContext.requestId), StoredResponse(fingerprint, wrap(Left(ServiceError.InvalidRequest("request_id cannot be reused for a different operation, resource, or parameters"))))))
+        state
       case None =>
         compute match
           case Left(error) => withResponse(state, requestContext, fingerprint, wrap(Left(error)))
