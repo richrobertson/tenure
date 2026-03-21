@@ -64,7 +64,7 @@ class RaftTransitionsSpec extends FunSuite:
     )
 
     assertEquals(RaftTransitions.majorityMatchedIndex(leaderState, majority = 2), 1L)
-    assertEquals(RaftTransitions.commitIndexToAdvance(leaderState, majority = 2), None)
+    assertEquals(RaftTransitions.eligibleCommitIndexForCurrentTerm(leaderState, majority = 2), None)
   }
 
   test("current-term majority match allows commit advancement and implicitly covers older prefix") {
@@ -78,7 +78,7 @@ class RaftTransitionsSpec extends FunSuite:
     )
 
     assertEquals(RaftTransitions.majorityMatchedIndex(leaderState, majority = 2), 2L)
-    assertEquals(RaftTransitions.commitIndexToAdvance(leaderState, majority = 2), Some(2L))
+    assertEquals(RaftTransitions.eligibleCommitIndexForCurrentTerm(leaderState, majority = 2), Some(2L))
   }
 
   test("steady-state current-term majority still commits the normal happy path") {
@@ -91,7 +91,7 @@ class RaftTransitionsSpec extends FunSuite:
     )
 
     assertEquals(RaftTransitions.majorityMatchedIndex(leaderState, majority = 2), 1L)
-    assertEquals(RaftTransitions.commitIndexToAdvance(leaderState, majority = 2), Some(1L))
+    assertEquals(RaftTransitions.eligibleCommitIndexForCurrentTerm(leaderState, majority = 2), Some(1L))
   }
 
   private def logEntry(index: Long, term: Long, requestId: String): RaftLogEntry =

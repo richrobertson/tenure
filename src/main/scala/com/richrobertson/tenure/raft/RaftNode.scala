@@ -187,7 +187,8 @@ object RaftTransitions:
     val candidates = matchIndexes.sorted
     candidates.drop(candidates.size - majority).headOption.getOrElse(0L)
 
-  def commitIndexToAdvance(state: RaftRuntimeState, majority: Int): Option[Long] =
+  // Raft leaders may advance commitIndex by replica counting only for entries from their current term.
+  def eligibleCommitIndexForCurrentTerm(state: RaftRuntimeState, majority: Int): Option[Long] =
     val candidate = majorityMatchedIndex(state, majority)
     if candidate <= state.commitIndex then None
     else
@@ -393,7 +394,7 @@ private final class LiveRaftNode[F[_]: Async](
     for
       outcomes <- config.raftPeers.filterNot(_.nodeId == config.nodeId).traverse(peer => replicateToPeer(initialState.currentTerm, peer))
       current <- stateRef.get
-      nextCommitIndex = RaftTransitions.commitIndexToAdvance(current, config.majority)
+      nextCommitIndex = RaftTransitions.eligibleCommitIndexForCurrentTerm(current, config.majority)
       _ <- nextCommitIndex.traverse_(commitThrough)
       now <- Temporal[F].realTime.map(_.toMillis)
       successes = outcomes.count(identity) + 1
