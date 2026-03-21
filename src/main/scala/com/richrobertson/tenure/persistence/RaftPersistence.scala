@@ -21,11 +21,21 @@ trait RaftPersistence[F[_]]:
   def saveSnapshot(snapshot: PersistedSnapshot): F[Unit]
 
 object RaftPersistence:
+  def fileBacked[F[_]: Sync](dataDir: String)(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]): F[RaftPersistence[F]] =
+    fileBacked(dataDir, "local", FailureInjector.noop[F], Observability.noop[F])
+
   def fileBacked[F[_]: Sync](
       dataDir: String,
-      nodeId: String = "local",
-      failureInjector: FailureInjector[F] = FailureInjector.noop[F],
-      observability: Observability[F] = Observability.noop[F]
+      nodeId: String,
+      observability: Observability[F]
+  )(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]): F[RaftPersistence[F]] =
+    fileBacked(dataDir, nodeId, FailureInjector.noop[F], observability)
+
+  def fileBacked[F[_]: Sync](
+      dataDir: String,
+      nodeId: String,
+      failureInjector: FailureInjector[F],
+      observability: Observability[F]
   )(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]): F[RaftPersistence[F]] =
     Sync[F].delay {
       val root = Paths.get(dataDir)

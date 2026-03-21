@@ -1,6 +1,7 @@
 package com.richrobertson.tenure.testkit
 
 import cats.effect.Ref
+import cats.Applicative
 import cats.effect.kernel.Temporal
 import cats.syntax.all.*
 import com.richrobertson.tenure.observability.{LogEvent, Observability}
@@ -17,8 +18,8 @@ trait FailureInjector[F[_]]:
   def inject(point: FailurePoint, nodeId: String): F[Unit]
 
 object FailureInjector:
-  def noop[F[_]: Temporal]: FailureInjector[F] = new FailureInjector[F]:
-    override def inject(point: FailurePoint, nodeId: String): F[Unit] = Temporal[F].unit
+  def noop[F[_]: Applicative]: FailureInjector[F] = new FailureInjector[F]:
+    override def inject(point: FailurePoint, nodeId: String): F[Unit] = Applicative[F].unit
 
   def controlled[F[_]: Temporal](observability: Observability[F], clockMillis: F[Long]): F[ControlledFailureInjector[F]] =
     Ref.of[F, Map[FailurePoint, Long]](Map.empty).map(new ControlledFailureInjector[F](_, observability, clockMillis))

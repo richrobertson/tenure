@@ -3,7 +3,7 @@ package com.richrobertson.tenure.observability
 import cats.effect.kernel.Sync
 import cats.effect.Ref
 import cats.syntax.all.*
-import io.circe.Codec
+import io.circe.{Codec, Decoder, Encoder}
 import io.circe.generic.semiauto.*
 
 private val MaxTimingSamplesPerMetric = 128
@@ -11,7 +11,20 @@ private val MaxEventCount = 512
 
 final case class MetricKey(name: String, labels: Map[String, String]) derives CanEqual
 object MetricKey:
-  given Ordering[MetricKey] = Ordering.by(key => (key.name, key.labels.toList.sortBy(_._1)))
+  given Ordering[MetricKey] with
+    override def compare(left: MetricKey, right: MetricKey): Int =
+      val byName = left.name.compareTo(right.name)
+      if byName != 0 then byName
+      else
+        val leftLabels = left.labels.toVector.sortBy(_._1)
+        val rightLabels = right.labels.toVector.sortBy(_._1)
+        leftLabels
+          .zip(rightLabels)
+          .collectFirst {
+            case ((leftKey, leftValue), (rightKey, rightValue)) if leftKey != rightKey => leftKey.compareTo(rightKey)
+            case ((leftKey, leftValue), (rightKey, rightValue)) if leftValue != rightValue => leftValue.compareTo(rightValue)
+          }
+          .getOrElse(leftLabels.size.compare(rightLabels.size))
   given Codec[MetricKey] = deriveCodec
 
 final case class LogEvent(
@@ -34,7 +47,10 @@ object LogEvent:
 
 final case class MetricSample[A](metric: MetricKey, value: A) derives CanEqual
 object MetricSample:
-  given [A: Codec]: Codec[MetricSample[A]] = deriveCodec
+  given [A: Encoder: Decoder]: Codec.AsObject[MetricSample[A]] = Codec.AsObject.from(
+    Decoder.forProduct2("metric", "value")(MetricSample.apply[A]),
+    Encoder.forProduct2("metric", "value")((sample: MetricSample[A]) => (sample.metric, sample.value))
+  )
 
 final case class ObservabilitySnapshot(
     counters: Vector[MetricSample[Long]],
@@ -44,7 +60,12 @@ final case class ObservabilitySnapshot(
 ) derives CanEqual
 object ObservabilitySnapshot:
   val empty: ObservabilitySnapshot = ObservabilitySnapshot(Vector.empty, Vector.empty, Vector.empty, Vector.empty)
-  given Codec[ObservabilitySnapshot] = deriveCodec
+  given Codec[ObservabilitySnapshot] = Codec.from(
+    Decoder.forProduct4("counters", "gauges", "timingsMillis", "events")(ObservabilitySnapshot.apply),
+    Encoder.forProduct4("counters", "gauges", "timingsMillis", "events")((snapshot: ObservabilitySnapshot) =>
+      (snapshot.counters, snapshot.gauges, snapshot.timingsMillis, snapshot.events)
+    )
+  )
 
 trait Observability[F[_]]:
   def incrementCounter(name: String, labels: Map[String, String] = Map.empty, delta: Long = 1L): F[Unit]
@@ -63,14 +84,14 @@ object Observability:
     Ref.of[F, InMemoryObservability.State](InMemoryObservability.State.empty).map(new InMemoryObservability[F](_))
 
 object InMemoryObservability:
-  private final case class State(
+  private[observability] final case class State(
       counters: Map[MetricKey, Long],
       gauges: Map[MetricKey, Long],
       timingsMillis: Map[MetricKey, Vector[Long]],
       events: Vector[LogEvent]
   )
 
-  private object State:
+  private[observability] object State:
     val empty: State = State(Map.empty, Map.empty, Map.empty, Vector.empty)
 
 final class InMemoryObservability[F[_]: Sync](state: Ref[F, InMemoryObservability.State]) extends Observability[F]:

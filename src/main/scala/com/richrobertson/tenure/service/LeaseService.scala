@@ -193,23 +193,35 @@ object LeaseMaterializer:
     state.copy(responses = state.responses.updated((requestContext.tenantId, requestContext.requestId), StoredResponse(fingerprint, result)))
 
 object LeaseService:
+  def inMemory[F[_]: Async](clock: Clock[F]): F[LeaseService[F]] =
+    inMemory(clock, TenantQuotaRegistry.default, Authorization.perTenant, Observability.noop[F])
+
+  def inMemory[F[_]: Async](clock: Clock[F], quotas: TenantQuotaRegistry): F[LeaseService[F]] =
+    inMemory(clock, quotas, Authorization.perTenant, Observability.noop[F])
+
+  def inMemory[F[_]: Async](clock: Clock[F], quotas: TenantQuotaRegistry, authorization: Authorization): F[LeaseService[F]] =
+    inMemory(clock, quotas, authorization, Observability.noop[F])
+
   def inMemory[F[_]: Async](
       clock: Clock[F],
-      quotas: TenantQuotaRegistry = TenantQuotaRegistry.default,
-      authorization: Authorization = Authorization.perTenant,
-      observability: Observability[F] = Observability.noop[F]
+      quotas: TenantQuotaRegistry,
+      authorization: Authorization,
+      observability: Observability[F]
   ): F[LeaseService[F]] =
     for
       stateRef <- cats.effect.Ref.of[F, ServiceState](ServiceState.empty)
       mutationLock <- Mutex[F]
     yield LocalLeaseService[F](stateRef, mutationLock, clock, quotas, authorization, observability)
 
+  def replicated[F[_]: Async](raftNode: RaftNode[F], clock: Clock[F]): LeaseService[F] =
+    replicated(raftNode, clock, TenantQuotaRegistry.default, Authorization.perTenant, Observability.noop[F])
+
   def replicated[F[_]: Async](
       raftNode: RaftNode[F],
       clock: Clock[F],
       quotas: TenantQuotaRegistry = TenantQuotaRegistry.default,
       authorization: Authorization = Authorization.perTenant,
-      observability: Observability[F] = Observability.noop[F]
+      observability: Observability[F]
   ): LeaseService[F] =
     ReplicatedLeaseService[F](raftNode, clock, quotas, authorization, observability)
 

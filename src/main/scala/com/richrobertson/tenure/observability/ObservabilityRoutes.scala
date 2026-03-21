@@ -1,6 +1,7 @@
 package com.richrobertson.tenure.observability
 
 import cats.effect.kernel.Concurrent
+import cats.syntax.all.*
 import io.circe.syntax.*
 import org.http4s.HttpRoutes
 import org.http4s.circe.CirceEntityEncoder.*
