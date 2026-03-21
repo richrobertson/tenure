@@ -147,7 +147,7 @@ class RaftIntegrationSpec extends CatsEffectSuite:
     node.readState.map(_.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, resourceId)))
 
   private def recordStatus(record: Option[com.richrobertson.tenure.model.LeaseRecord]): LeaseStatus =
-    record.fold(LeaseStatus.Available)(_.status)
+    record.fold(LeaseStatus.Absent)(_.status)
 
   private def eventually[A](label: String, timeout: FiniteDuration = 8.seconds, interval: FiniteDuration = 200.millis)(thunk: IO[A]): IO[A] =
     IO.monotonic.flatMap { start =>
