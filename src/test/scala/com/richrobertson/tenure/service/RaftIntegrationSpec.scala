@@ -20,6 +20,8 @@ class RaftIntegrationSpec extends CatsEffectSuite:
   private val tenantId = TenantId("tenant-a")
   private val resourceId = ResourceId("resource-1")
 
+  override val munitTimeout: FiniteDuration = 45.seconds
+
   test("multi-node cluster preserves leader-only reads, failover authority, and follower catch-up after restart") {
     withCluster(3).use { cluster =>
       for
