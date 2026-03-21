@@ -17,16 +17,20 @@ Milestone 1 is complete. The repository now includes a runnable single-node Scal
 sbt run
 ```
 
-The server listens on `0.0.0.0:8080`.
+The server listens on `0.0.0.0:8080`. The no-argument `sbt run` path starts the single-node prototype, while clustered mode still uses `sbt "run -- <config-path>"`.
 
 ## Example calls
 
 ```bash
 curl -X POST http://localhost:8080/v1/leases/acquire \
   -H 'content-type: application/json' \
+  -H 'X-Tenure-Principal-Id: demo-user' \
+  -H 'X-Tenure-Principal-Tenant: acme' \
   -d '{"tenant_id":"acme","resource_id":"scheduler-primary","holder_id":"worker-1","ttl_seconds":15,"request_id":"req-1"}'
 
-curl http://localhost:8080/v1/leases/acme/scheduler-primary
+curl http://localhost:8080/v1/leases/acme/scheduler-primary \
+  -H 'X-Tenure-Principal-Id: demo-user' \
+  -H 'X-Tenure-Principal-Tenant: acme'
 
 # absent leases return 200 with {"found":false,...} rather than HTTP 404
 ```

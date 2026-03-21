@@ -104,6 +104,12 @@ sbt test
 sbt run
 ```
 
+This starts the single-node prototype on `0.0.0.0:8080`. To run the clustered mode instead, pass a config file path:
+
+```bash
+sbt "run -- node-1.json"
+```
+
 ### Local API
 
 - `POST /v1/leases/acquire`
