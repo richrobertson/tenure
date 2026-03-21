@@ -41,7 +41,9 @@ Milestone 3 is complete. The repo now includes deterministic replicated apply se
 - **Demo/test expectation:** Deterministic tests show linearizable `GetLease`, leader-only `ListLeases`, renewal before expiry, rejection after authoritative expiry, duplicate request replay across leadership change, and `NOT_LEADER` responses from followers.
 - **Done means:** The replicated state machine produces the documented lease lifecycle outcomes under retries and leadership changes, with leader-only reads demonstrated.
 
-## Milestone 4: multitenant quotas, idempotency, and fencing tokens
+## Milestone 4: multitenant quotas, idempotency, and fencing tokens *(complete)*
+
+Milestone 4 is complete. The repo now includes tenant-scoped request deduplication keyed by tenant plus semantic compatibility, per-tenant max-active-lease and max-TTL policy enforcement, monotonic fencing tokens in the external lease view, and explicit principal-to-tenant authorization checks at the service boundary. Deterministic tests cover replay, duplicate mismatch rejection, quota failures, cross-tenant denial, fencing-token turnover, stale-writer rejection, and leader-only read behavior.
 
 - **Objective:** Make multitenancy and stale-writer protection explicit in the service contract.
 - **Deliverables:** Tenant-scoped request IDs, quota enforcement, fencing token issuance, and tenant-aware authorization boundaries.

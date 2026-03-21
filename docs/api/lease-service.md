@@ -32,12 +32,17 @@ LeaseView {
 
 - All resources are addressed as `(tenant_id, resource_id)`.
 - `Acquire`, `Renew`, and `Release` require a client-supplied `request_id`.
+- Every request is evaluated in a tenant-aware principal context; v1 uses explicit request metadata rather than a full external identity provider.
 - `GetLease` is a leader-only linearizable read in v1.
 - `ListLeases` is also a leader-only linearizable read in v1.
 - Clients must route `GetLease` and `ListLeases` to the current leader in v1, or rely on server-side redirection if supported.
 - Follower-served reads are out of scope for v1.
 - Lease validity is determined by authoritative replicated state plus leader-mediated expiry rules, not by client-local wall clock.
 - TTL is validated against global service policy and per-tenant policy.
+
+## Authorization context
+
+Implementations must associate every request with a principal identity and a principal tenant. The current prototype uses `X-Tenure-Principal-Id` and `X-Tenure-Principal-Tenant` headers. The principal tenant must match the request `tenant_id` or the request fails with `FORBIDDEN`.
 
 ## Acquire
 
@@ -64,6 +69,8 @@ Semantics:
 - The requested TTL must satisfy the service's global and per-tenant maximum TTL policy.
 - The service may reject TTLs that are too short to operate safely.
 - If the same `request_id` is retried for the same logical operation, the response must be idempotent.
+- Reusing the same `request_id` with different holder, TTL, resource, or operation semantics must be rejected.
+- A mismatched reuse must not replace the original stored result; a later exact transport retry still replays the authoritative original outcome.
 - `fencing_token` increases on each successful new grant for the resource.
 
 ## Renew
@@ -242,7 +249,11 @@ Notes:
 
 ## Examples
 
-### Acquire
+### Authorization context
+
+Implementations must associate every request with a principal identity and a principal tenant. The current prototype uses `X-Tenure-Principal-Id` and `X-Tenure-Principal-Tenant` headers. The principal tenant must match the request `tenant_id` or the request fails with `FORBIDDEN`.
+
+## Acquire
 
 ```json
 {
