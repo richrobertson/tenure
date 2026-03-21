@@ -1,30 +1,30 @@
 package com.richrobertson.tenure.model
 
-import io.circe.Codec
+import io.circe.{Codec, Decoder, Encoder}
 import io.circe.generic.semiauto.*
 import java.time.Instant
 import java.util.UUID
 
 final case class TenantId(value: String) extends AnyVal
 object TenantId:
-  given Codec[TenantId] = Codec.from(Codec[String].map(TenantId.apply), Codec[String].contramap(_.value))
+  given Codec[TenantId] = Codec.from(Decoder.decodeString.map(TenantId.apply), Encoder.encodeString.contramap(_.value))
 
 final case class ResourceId(value: String) extends AnyVal
 object ResourceId:
-  given Codec[ResourceId] = Codec.from(Codec[String].map(ResourceId.apply), Codec[String].contramap(_.value))
+  given Codec[ResourceId] = Codec.from(Decoder.decodeString.map(ResourceId.apply), Encoder.encodeString.contramap(_.value))
 
 final case class ClientId(value: String) extends AnyVal
 object ClientId:
-  given Codec[ClientId] = Codec.from(Codec[String].map(ClientId.apply), Codec[String].contramap(_.value))
+  given Codec[ClientId] = Codec.from(Decoder.decodeString.map(ClientId.apply), Encoder.encodeString.contramap(_.value))
 
 final case class LeaseId(value: UUID) extends AnyVal
 object LeaseId:
   def random(): LeaseId = LeaseId(UUID.randomUUID())
-  given Codec[LeaseId] = Codec.from(Codec[UUID].map(LeaseId.apply), Codec[UUID].contramap(_.value))
+  given Codec[LeaseId] = Codec.from(Decoder.decodeUUID.map(LeaseId.apply), Encoder.encodeUUID.contramap(_.value))
 
 final case class RequestId(value: String) extends AnyVal
 object RequestId:
-  given Codec[RequestId] = Codec.from(Codec[String].map(RequestId.apply), Codec[String].contramap(_.value))
+  given Codec[RequestId] = Codec.from(Decoder.decodeString.map(RequestId.apply), Encoder.encodeString.contramap(_.value))
 
 final case class ResourceKey(tenantId: TenantId, resourceId: ResourceId)
 object ResourceKey:
@@ -34,8 +34,8 @@ enum LeaseStatus:
   case Active, Released, Expired, Absent
 object LeaseStatus:
   given Codec[LeaseStatus] = Codec.from(
-    Codec[String].map(str => LeaseStatus.valueOf(str)),
-    Codec[String].contramap(_.toString)
+    Decoder.decodeString.map(str => LeaseStatus.valueOf(str)),
+    Encoder.encodeString.contramap(_.toString)
   )
 
 final case class LeaseRecord(

@@ -30,7 +30,7 @@ object Main extends IOApp:
       service = LeaseService.replicated[IO](raftNode, Clock.system[IO])
       _ <- EmberServerBuilder
         .default[IO]
-        .withHost(com.comcast.ip4s.Host.fromString(config.apiHost).getOrElse(com.comcast.ip4s.host"127.0.0.1"))
+        .withHost(com.comcast.ip4s.Host.fromString(config.apiHost).getOrElse(com.comcast.ip4s.Host.fromString("127.0.0.1").get))
         .withPort(com.comcast.ip4s.Port.fromInt(config.apiPort).get)
         .withHttpApp(LeaseRoutes.routes[IO](service).orNotFound)
         .build

@@ -1,7 +1,7 @@
 package com.richrobertson.tenure.time
 
-import cats.effect.kernel.Sync
-import cats.effect.kernel.Ref
+import cats.effect.kernel.{Ref, Sync}
+import cats.syntax.functor.*
 import java.time.Instant
 
 trait Clock[F[_]]:

@@ -1,7 +1,6 @@
 package com.richrobertson.tenure.service
 
-import cats.effect.kernel.Concurrent
-import cats.effect.kernel.Ref
+import cats.effect.kernel.{Async, Concurrent, Ref, Sync}
 import cats.effect.std.Mutex
 import cats.syntax.all.*
 import com.richrobertson.tenure.model.*
@@ -171,13 +170,13 @@ object LeaseMaterializer:
     state.copy(responses = state.responses.updated((requestContext.tenantId, requestContext.requestId), StoredResponse(operation, requestContext.resourceKey, result)))
 
 object LeaseService:
-  def inMemory[F[_]: Concurrent](clock: Clock[F]): F[LeaseService[F]] =
+  def inMemory[F[_]: Async](clock: Clock[F]): F[LeaseService[F]] =
     for
       stateRef <- Ref.of[F, ServiceState](ServiceState.empty)
       mutationLock <- Mutex[F]
     yield LocalLeaseService[F](stateRef, mutationLock, clock)
 
-  def replicated[F[_]: Concurrent](raftNode: RaftNode[F], clock: Clock[F]): LeaseService[F] =
+  def replicated[F[_]: Async](raftNode: RaftNode[F], clock: Clock[F]): LeaseService[F] =
     ReplicatedLeaseService[F](raftNode, clock)
 
 private trait ValidationSupport:
@@ -229,14 +228,14 @@ private trait ValidationSupport:
   protected def parseLeaseId(value: String): Either[String, LeaseId] =
     Either.catchNonFatal(UUID.fromString(value.trim)).leftMap(_ => "lease_id must be a valid UUID").map(LeaseId.apply)
 
-private final case class LocalLeaseService[F[_]: Concurrent](stateRef: Ref[F, ServiceState], mutationLock: Mutex[F], clock: Clock[F])
+private final case class LocalLeaseService[F[_]: Async](stateRef: Ref[F, ServiceState], mutationLock: Mutex[F], clock: Clock[F])
     extends LeaseService[F]
     with ValidationSupport:
 
   override def acquire(request: AcquireRequest): F[Either[ServiceError, AcquireResult]] =
     validateAcquire(request).fold(_.asLeft[AcquireResult].pure[F], valid =>
       handleWithIdempotency(valid.requestContext, RequestOperation.Acquire)(LeaseMaterializer.replayAcquire) {
-        Concurrent[F].delay(LeaseId.random()).flatMap { nextLeaseId =>
+        Async[F].delay(LeaseId.random()).flatMap { nextLeaseId =>
           clock.now.map { now =>
             val command = AcquireCommand(valid.requestContext, valid.holderId, valid.ttlSeconds, nextLeaseId, now)
             stateRef.modify { current =>
@@ -307,11 +306,11 @@ private final case class LocalLeaseService[F[_]: Concurrent](stateRef: Ref[F, Se
       }
     }
 
-private final case class ReplicatedLeaseService[F[_]: Concurrent](raftNode: RaftNode[F], clock: Clock[F]) extends LeaseService[F] with ValidationSupport:
+private final case class ReplicatedLeaseService[F[_]: Async](raftNode: RaftNode[F], clock: Clock[F]) extends LeaseService[F] with ValidationSupport:
   override def acquire(request: AcquireRequest): F[Either[ServiceError, AcquireResult]] =
     validateAcquire(request).fold(_.asLeft[AcquireResult].pure[F], valid =>
       clock.now.flatMap(now =>
-        Concurrent[F].delay(LeaseId.random()).flatMap { nextLeaseId =>
+        Async[F].delay(LeaseId.random()).flatMap { nextLeaseId =>
           raftNode.submit(AcquireCommand(valid.requestContext, valid.holderId, valid.ttlSeconds, nextLeaseId, now)).map {
             case Left(notLeader) => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not the leader", notLeader.leaderHint))
             case Right(stored) => LeaseMaterializer.replayAcquire(stored).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))

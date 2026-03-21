@@ -28,6 +28,7 @@ object PersistedMetadata:
 
 final case class RaftLogEntry(index: Long, term: Long, command: ReplicatedCommand) derives CanEqual
 object RaftLogEntry:
+  import PeerMessage.given
   given Codec[RaftLogEntry] = deriveCodec
 
 final case class PersistedNodeState(metadata: PersistedMetadata, entries: Vector[RaftLogEntry]) derives CanEqual
@@ -61,6 +62,19 @@ object PeerMessage:
   given Codec[ReleaseResult] = deriveCodec
   given Codec[ServiceError] = Codec.from(serviceErrorDecoder, serviceErrorEncoder)
   given Codec[ReplicatedCommand] = Codec.from(commandDecoder, commandEncoder)
+  private def eitherDecoder[A: Decoder]: Decoder[Either[ServiceError, A]] = Decoder.instance { cursor =>
+    cursor.get[String]("type").flatMap {
+      case "left"  => cursor.get[ServiceError]("value").map(Left.apply)
+      case "right" => cursor.get[A]("value").map(Right.apply)
+      case other    => Left(io.circe.DecodingFailure(s"unknown either type $other", cursor.history))
+    }
+  }
+
+  private def eitherEncoder[A: Encoder]: Encoder[Either[ServiceError, A]] = Encoder.instance {
+    case Left(error)   => Json.obj("type" -> Json.fromString("left"), "value" -> error.asJson)
+    case Right(result) => Json.obj("type" -> Json.fromString("right"), "value" -> result.asJson)
+  }
+
   given Codec[StoredResult] = Codec.from(storedResultDecoder, storedResultEncoder)
   given Codec[PeerMessage] = Codec.from(peerMessageDecoder, peerMessageEncoder)
 
@@ -102,17 +116,17 @@ object PeerMessage:
 
   private val storedResultDecoder: Decoder[StoredResult] = Decoder.instance { cursor =>
     cursor.get[String]("type").flatMap {
-      case "acquire" => cursor.get[Either[ServiceError, AcquireResult]]("payload").map(StoredResult.Acquire.apply)
-      case "renew"   => cursor.get[Either[ServiceError, RenewResult]]("payload").map(StoredResult.Renew.apply)
-      case "release" => cursor.get[Either[ServiceError, ReleaseResult]]("payload").map(StoredResult.Release.apply)
+      case "acquire" => cursor.downField("payload").as(eitherDecoder[AcquireResult]).map(StoredResult.Acquire.apply)
+      case "renew"   => cursor.downField("payload").as(eitherDecoder[RenewResult]).map(StoredResult.Renew.apply)
+      case "release" => cursor.downField("payload").as(eitherDecoder[ReleaseResult]).map(StoredResult.Release.apply)
       case other      => Left(io.circe.DecodingFailure(s"unknown stored result $other", cursor.history))
     }
   }
 
   private val storedResultEncoder: Encoder[StoredResult] = Encoder.instance {
-    case payload: StoredResult.Acquire => Json.obj("type" -> Json.fromString("acquire"), "payload" -> payload.value.asJson)
-    case payload: StoredResult.Renew   => Json.obj("type" -> Json.fromString("renew"), "payload" -> payload.value.asJson)
-    case payload: StoredResult.Release => Json.obj("type" -> Json.fromString("release"), "payload" -> payload.value.asJson)
+    case payload: StoredResult.Acquire => Json.obj("type" -> Json.fromString("acquire"), "payload" -> eitherEncoder[AcquireResult].apply(payload.value))
+    case payload: StoredResult.Renew   => Json.obj("type" -> Json.fromString("renew"), "payload" -> eitherEncoder[RenewResult].apply(payload.value))
+    case payload: StoredResult.Release => Json.obj("type" -> Json.fromString("release"), "payload" -> eitherEncoder[ReleaseResult].apply(payload.value))
   }
 
   private val peerMessageDecoder: Decoder[PeerMessage] = Decoder.instance { cursor =>
@@ -255,9 +269,9 @@ private final class LiveRaftNode[F[_]: Async](
 
   def start: F[Unit] =
     for
-      serverFiber <- serverLoop.start
-      electionFiber <- electionLoop.start
-      heartbeatFiber <- heartbeatLoop.start
+      serverFiber <- Async[F].start(serverLoop)
+      electionFiber <- Async[F].start(electionLoop)
+      heartbeatFiber <- Async[F].start(heartbeatLoop)
       _ <- fibersRef.set(List(serverFiber, electionFiber, heartbeatFiber))
     yield ()
 
@@ -308,18 +322,20 @@ private final class LiveRaftNode[F[_]: Async](
     }
 
   private def serverLoop: F[Unit] =
-    Async[F].blocking {
-      val server = new ServerSocket()
-      server.setReuseAddress(true)
-      server.bind(new InetSocketAddress(config.localPeer.host, config.localPeer.port))
-      server
-    }.bracket { server =>
-      serverRef.set(Some(server)) *> acceptLoop(server)
-    }(server => serverRef.set(None) *> Async[F].blocking(server.close()).handleError(_ => ()))
+    Async[F].bracket(
+      Async[F].blocking {
+        val server = new ServerSocket()
+        server.setReuseAddress(true)
+        server.bind(new InetSocketAddress(config.localPeer.host, config.localPeer.port))
+        server
+      }
+    )(server => serverRef.set(Some(server)) *> acceptLoop(server))(server =>
+      serverRef.set(None) *> Async[F].blocking(server.close()).handleError(_ => ())
+    )
 
   private def acceptLoop(server: ServerSocket): F[Unit] =
     Async[F].blocking(server.accept()).attempt.flatMap {
-      case Right(socket) => handleSocket(socket).start.void *> acceptLoop(server)
+      case Right(socket) => Async[F].start(handleSocket(socket)).void *> acceptLoop(server)
       case Left(_)       => Async[F].unit
     }
 
@@ -458,11 +474,13 @@ private final class LiveRaftNode[F[_]: Async](
     }
 
   private def handleSocket(socket: Socket): F[Unit] =
-    Async[F].blocking {
-      val reader = new BufferedReader(new InputStreamReader(socket.getInputStream, StandardCharsets.UTF_8))
-      val writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream, StandardCharsets.UTF_8))
-      (reader, writer)
-    }.bracket { case (reader, writer) =>
+    Async[F].bracket(
+      Async[F].blocking {
+        val reader = new BufferedReader(new InputStreamReader(socket.getInputStream, StandardCharsets.UTF_8))
+        val writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream, StandardCharsets.UTF_8))
+        (reader, writer)
+      }
+    ) { case (reader, writer) =>
       Async[F].blocking(reader.readLine()).flatMap(line => Async[F].fromEither(decode[PeerMessage](line))).flatMap(handlePeerMessage).flatMap { response =>
         Async[F].blocking {
           writer.write(response.asJson.noSpaces)
@@ -508,7 +526,7 @@ private final class LiveRaftNode[F[_]: Async](
     yield ()
 
   private def send(peer: PeerNode, message: PeerMessage): F[PeerMessage] =
-    Async[F].blocking(new Socket()).bracket { socket =>
+    Async[F].bracket(Async[F].blocking(new Socket()))(socket =>
       Async[F].blocking(socket.connect(new InetSocketAddress(peer.host, peer.port), 1000)).flatMap { _ =>
         Async[F].blocking {
           val writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream, StandardCharsets.UTF_8))
@@ -519,7 +537,7 @@ private final class LiveRaftNode[F[_]: Async](
           reader.readLine()
         }.flatMap(line => Async[F].fromEither(decode[PeerMessage](line)))
       }
-    }(socket => Async[F].blocking(socket.close()).handleError(_ => ()))
+    )(socket => Async[F].blocking(socket.close()).handleError(_ => ()))
 
   private def randomElectionTimeout: F[FiniteDuration] =
     Temporal[F].realTime.map(_.toMillis).map { now =>

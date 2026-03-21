@@ -7,6 +7,7 @@ import com.richrobertson.tenure.persistence.RaftPersistence
 import com.richrobertson.tenure.raft.{ClusterConfig, NodeRole, PeerNode, RaftNode}
 import com.richrobertson.tenure.time.Clock
 import munit.CatsEffectSuite
+import java.net.ServerSocket
 import java.nio.file.Files
 import scala.concurrent.duration.*
 
@@ -82,15 +83,25 @@ class RaftIntegrationSpec extends CatsEffectSuite:
   private def clusterResource: Resource[IO, TestCluster] =
     for
       root <- Resource.eval(IO.blocking(Files.createTempDirectory("tenure-raft-spec")))
+      peerPorts <- Resource.eval(List.fill(3)(freeLocalPort).sequence)
+      apiPorts <- Resource.eval(List.fill(3)(freeLocalPort).sequence)
       peers = List(
-        PeerNode("node-1", "127.0.0.1", 19091),
-        PeerNode("node-2", "127.0.0.1", 19092),
-        PeerNode("node-3", "127.0.0.1", 19093)
+        PeerNode("node-1", "127.0.0.1", peerPorts(0)),
+        PeerNode("node-2", "127.0.0.1", peerPorts(1)),
+        PeerNode("node-3", "127.0.0.1", peerPorts(2))
       )
-      node1 <- TestNode.resource(ClusterConfig("node-1", "127.0.0.1", 18081, peers, root.resolve("node-1").toString))
-      node2 <- TestNode.resource(ClusterConfig("node-2", "127.0.0.1", 18082, peers, root.resolve("node-2").toString))
-      node3 <- TestNode.resource(ClusterConfig("node-3", "127.0.0.1", 18083, peers, root.resolve("node-3").toString))
+      node1 <- TestNode.resource(ClusterConfig("node-1", "127.0.0.1", apiPorts(0), peers, root.resolve("node-1").toString))
+      node2 <- TestNode.resource(ClusterConfig("node-2", "127.0.0.1", apiPorts(1), peers, root.resolve("node-2").toString))
+      node3 <- TestNode.resource(ClusterConfig("node-3", "127.0.0.1", apiPorts(2), peers, root.resolve("node-3").toString))
     yield TestCluster(List(node1, node2, node3))
+
+
+  private def freeLocalPort: IO[Int] =
+    IO.blocking {
+      val socket = new ServerSocket(0)
+      try socket.getLocalPort
+      finally socket.close()
+    }
 
   private final case class TestCluster(nodes: List[TestNode]):
     def otherThan(nodeId: String): List[TestNode] = nodes.filterNot(_.id == nodeId)
