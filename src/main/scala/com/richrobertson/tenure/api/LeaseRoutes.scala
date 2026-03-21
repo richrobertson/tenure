@@ -3,15 +3,17 @@ package com.richrobertson.tenure.api
 import cats.Applicative
 import cats.effect.kernel.Concurrent
 import cats.syntax.all.*
+import com.richrobertson.tenure.auth.Principal
 import com.richrobertson.tenure.model.{LeaseStatus, LeaseView, ResourceId, TenantId}
 import com.richrobertson.tenure.service.*
 import io.circe.Codec
 import io.circe.Decoder
 import io.circe.Encoder
 import org.http4s.DecodeFailure
-import org.http4s.HttpRoutes
+import org.http4s.{HttpRoutes, Response, Status}
 import org.http4s.circe.CirceEntityCodec.*
 import org.http4s.dsl.Http4sDsl
+import org.typelevel.ci.CIStringSyntax
 
 final case class AcquireRequestBody(tenantId: String, resourceId: String, holderId: String, ttlSeconds: Long, requestId: String)
 final case class RenewRequestBody(tenantId: String, resourceId: String, leaseId: String, holderId: String, ttlSeconds: Long, requestId: String)
@@ -34,6 +36,9 @@ final case class GetLeaseResponse(found: Boolean, lease: LeaseResponse)
 final case class ListLeasesResponse(leases: List[LeaseResponse])
 
 object LeaseRoutes:
+  private val principalIdHeader = ci"X-Tenure-Principal-Id"
+  private val principalTenantHeader = ci"X-Tenure-Principal-Tenant"
+
   given Codec[AcquireRequestBody] = Codec.from(
     Decoder.forProduct5("tenant_id", "resource_id", "holder_id", "ttl_seconds", "request_id")(AcquireRequestBody.apply),
     Encoder.forProduct5("tenant_id", "resource_id", "holder_id", "ttl_seconds", "request_id")(body =>
@@ -109,38 +114,59 @@ object LeaseRoutes:
 
     HttpRoutes.of[F] {
       case req @ POST -> Root / "v1" / "leases" / "acquire" =>
-        decodeBody[F, AcquireRequestBody](req).flatMap {
-          case Right(body) =>
-            service.acquire(AcquireRequest(body.tenantId, body.resourceId, body.holderId, body.ttlSeconds, body.requestId)).flatMap(resultToHttpAcquire(_))
-          case Left(response) => response.pure[F]
+        withPrincipal(req) { principal =>
+          decodeBody[F, AcquireRequestBody](req).flatMap {
+            case Right(body) =>
+              service.acquire(AcquireRequest(principal, body.tenantId, body.resourceId, body.holderId, body.ttlSeconds, body.requestId)).flatMap(resultToHttpAcquire(_))
+            case Left(response) => response.pure[F]
+          }
         }
 
       case req @ POST -> Root / "v1" / "leases" / "renew" =>
-        decodeBody[F, RenewRequestBody](req).flatMap {
-          case Right(body) =>
-            service.renew(RenewRequest(body.tenantId, body.resourceId, body.leaseId, body.holderId, body.ttlSeconds, body.requestId)).flatMap(resultToHttpRenew(_))
-          case Left(response) => response.pure[F]
+        withPrincipal(req) { principal =>
+          decodeBody[F, RenewRequestBody](req).flatMap {
+            case Right(body) =>
+              service.renew(RenewRequest(principal, body.tenantId, body.resourceId, body.leaseId, body.holderId, body.ttlSeconds, body.requestId)).flatMap(resultToHttpRenew(_))
+            case Left(response) => response.pure[F]
+          }
         }
 
       case req @ POST -> Root / "v1" / "leases" / "release" =>
-        decodeBody[F, ReleaseRequestBody](req).flatMap {
-          case Right(body) =>
-            service.release(ReleaseRequest(body.tenantId, body.resourceId, body.leaseId, body.holderId, body.requestId)).flatMap(resultToHttpRelease(_))
-          case Left(response) => response.pure[F]
+        withPrincipal(req) { principal =>
+          decodeBody[F, ReleaseRequestBody](req).flatMap {
+            case Right(body) =>
+              service.release(ReleaseRequest(principal, body.tenantId, body.resourceId, body.leaseId, body.holderId, body.requestId)).flatMap(resultToHttpRelease(_))
+            case Left(response) => response.pure[F]
+          }
         }
 
-      case GET -> Root / "v1" / "leases" / tenantId / resourceId =>
-        service.getLease(TenantId(tenantId), ResourceId(resourceId)).flatMap {
-          case Right(result) => Ok(GetLeaseResponse(result.found, toLeaseResponse(result.lease)))
-          case Left(error)   => errorToHttp(error)
+      case req @ GET -> Root / "v1" / "leases" / tenantId / resourceId =>
+        withPrincipal(req) { principal =>
+          service.getLease(GetLeaseRequest(principal, tenantId, resourceId)).flatMap {
+            case Right(result) => Ok(GetLeaseResponse(result.found, toLeaseResponse(result.lease)))
+            case Left(error)   => errorToHttp(error)
+          }
         }
 
-      case GET -> Root / "v1" / "tenants" / tenantId / "leases" =>
-        service.listLeases(TenantId(tenantId)).flatMap {
-          case Right(result) => Ok(ListLeasesResponse(result.leases.map(toLeaseResponse)))
-          case Left(error)   => errorToHttp(error)
+      case req @ GET -> Root / "v1" / "tenants" / tenantId / "leases" =>
+        withPrincipal(req) { principal =>
+          service.listLeases(ListLeasesRequest(principal, tenantId)).flatMap {
+            case Right(result) => Ok(ListLeasesResponse(result.leases.map(toLeaseResponse)))
+            case Left(error)   => errorToHttp(error)
+          }
         }
     }
+
+  private def withPrincipal[F[_]: Applicative](req: org.http4s.Request[F])(use: Principal => F[org.http4s.Response[F]])(using dsl: Http4sDsl[F]): F[org.http4s.Response[F]] =
+    import dsl.*
+    val principal = for
+      id <- req.headers.get(principalIdHeader).map(_.head.value.trim).filter(_.nonEmpty)
+      tenant <- req.headers.get(principalTenantHeader).map(_.head.value.trim).filter(_.nonEmpty)
+    yield Principal(id, TenantId(tenant))
+
+    principal match
+      case Some(principalValue) => use(principalValue)
+      case None => Response[F](status = Status.Unauthorized).withEntity(ErrorResponse("UNAUTHORIZED", s"headers ${principalIdHeader.toString} and ${principalTenantHeader.toString} are required")).pure[F]
 
   private def decodeBody[F[_]: Concurrent, A: Decoder](req: org.http4s.Request[F])(using dsl: Http4sDsl[F]): F[Either[org.http4s.Response[F], A]] =
     import dsl.*
@@ -193,10 +219,13 @@ object LeaseRoutes:
     import dsl.*
     error match
       case ServiceError.InvalidRequest(message) => BadRequest(ErrorResponse("INVALID_ARGUMENT", message))
+      case ServiceError.Unauthorized(message)   => Response[F](status = Status.Unauthorized).withEntity(ErrorResponse("UNAUTHORIZED", message)).pure[F]
+      case ServiceError.Forbidden(message)      => Forbidden(ErrorResponse("FORBIDDEN", message))
       case ServiceError.AlreadyHeld(message)    => Conflict(ErrorResponse("ALREADY_HELD", message))
       case ServiceError.LeaseExpired(message)   => Conflict(ErrorResponse("LEASE_EXPIRED", message))
       case ServiceError.LeaseMismatch(message)  => Conflict(ErrorResponse("LEASE_MISMATCH", message))
       case ServiceError.NotFound(message)       => NotFound(ErrorResponse("NOT_FOUND", message))
+      case ServiceError.QuotaExceeded(message)  => Conflict(ErrorResponse("QUOTA_EXCEEDED", message))
       case ServiceError.NotLeader(message, leaderHint) => Conflict(ErrorResponse("NOT_LEADER", message, leaderHint))
 
   private def toLeaseResponse(view: LeaseView): LeaseResponse =

@@ -54,7 +54,7 @@ Architecture and planning work from Milestone 0 are complete, and Milestone 1 is
 
 Milestone 2 is complete. The repo now contains a single-group Raft integration path with static-config bootstrap, replicated mutating commands, follower `NOT_LEADER` behavior, local metadata/log persistence, and a passing automated Scala test suite for the clustered prototype.
 
-Milestone 3 is also complete. The replicated lease lifecycle now has deterministic `Acquire`, `Renew`, `Release`, and leader-only `GetLease` semantics backed by an authoritative materialized lease map reconstructed from committed Raft commands, plus duplicate-request replay and leadership-change coverage in the automated tests.
+Milestone 4 is now complete. The service contract exposes tenant-scoped request IDs, replay-safe idempotency, per-tenant lease quotas, monotonic fencing tokens, and explicit tenant-aware authorization checks, all validated by deterministic tests and demo transcripts.
 
 ## Project documents
 
@@ -70,6 +70,7 @@ Milestone 3 is also complete. The replicated lease lifecycle now has determinist
 - [Milestone 1 local demo](docs/demo/milestone-1.md)
 - [Milestone 2 clustered demo](docs/demo/milestone-2.md)
 - [Milestone 3 lifecycle demo](docs/demo/milestone-3.md)
+- [Milestone 4 quotas/idempotency/fencing demo](docs/demo/milestone-4.md)
 
 ## Why leases are different from simple distributed locks
 
@@ -81,7 +82,7 @@ Tenure is intentionally scoped at the point where distributed-systems correctnes
 
 ## Future work
 
-Milestone 3 is now complete. Later milestones still need stronger recovery tooling, observability, quota policy, and a sharding-ready routing layer.
+Milestone 4 is now complete. Milestone 5 still needs snapshotting and broader crash-recovery tooling beyond the current replay-based materialization path.
 
 ## Local prototype
 

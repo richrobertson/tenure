@@ -6,6 +6,7 @@ import cats.effect.{Fiber, Ref}
 import cats.syntax.all.*
 import com.richrobertson.tenure.model.LeaseView
 import com.richrobertson.tenure.persistence.RaftPersistence
+import com.richrobertson.tenure.quota.TenantQuotaRegistry
 import com.richrobertson.tenure.service.*
 import io.circe.Codec
 import io.circe.{Decoder, Encoder, Json}
@@ -81,22 +82,28 @@ object PeerMessage:
   private val serviceErrorDecoder: Decoder[ServiceError] = Decoder.instance { cursor =>
     cursor.get[String]("type").flatMap {
       case "invalid_request" => cursor.get[String]("message").map(ServiceError.InvalidRequest.apply)
-      case "already_held"    => cursor.get[String]("message").map(ServiceError.AlreadyHeld.apply)
-      case "lease_expired"   => cursor.get[String]("message").map(ServiceError.LeaseExpired.apply)
-      case "lease_mismatch"  => cursor.get[String]("message").map(ServiceError.LeaseMismatch.apply)
-      case "not_found"       => cursor.get[String]("message").map(ServiceError.NotFound.apply)
-      case "not_leader"      => (cursor.get[String]("message"), cursor.get[Option[String]]("leader_hint")).mapN(ServiceError.NotLeader.apply)
+      case "unauthorized"   => cursor.get[String]("message").map(ServiceError.Unauthorized.apply)
+      case "forbidden"      => cursor.get[String]("message").map(ServiceError.Forbidden.apply)
+      case "already_held"   => cursor.get[String]("message").map(ServiceError.AlreadyHeld.apply)
+      case "lease_expired"  => cursor.get[String]("message").map(ServiceError.LeaseExpired.apply)
+      case "lease_mismatch" => cursor.get[String]("message").map(ServiceError.LeaseMismatch.apply)
+      case "not_found"      => cursor.get[String]("message").map(ServiceError.NotFound.apply)
+      case "quota_exceeded" => cursor.get[String]("message").map(ServiceError.QuotaExceeded.apply)
+      case "not_leader"     => (cursor.get[String]("message"), cursor.get[Option[String]]("leader_hint")).mapN(ServiceError.NotLeader.apply)
       case other              => Left(io.circe.DecodingFailure(s"unknown service error $other", cursor.history))
     }
   }
 
   private val serviceErrorEncoder: Encoder[ServiceError] = Encoder.instance {
-    case ServiceError.InvalidRequest(message)         => Json.obj("type" -> Json.fromString("invalid_request"), "message" -> Json.fromString(message))
-    case ServiceError.AlreadyHeld(message)            => Json.obj("type" -> Json.fromString("already_held"), "message" -> Json.fromString(message))
-    case ServiceError.LeaseExpired(message)           => Json.obj("type" -> Json.fromString("lease_expired"), "message" -> Json.fromString(message))
-    case ServiceError.LeaseMismatch(message)          => Json.obj("type" -> Json.fromString("lease_mismatch"), "message" -> Json.fromString(message))
-    case ServiceError.NotFound(message)               => Json.obj("type" -> Json.fromString("not_found"), "message" -> Json.fromString(message))
-    case ServiceError.NotLeader(message, leaderHint)  => Json.obj("type" -> Json.fromString("not_leader"), "message" -> Json.fromString(message), "leader_hint" -> leaderHint.asJson)
+    case ServiceError.InvalidRequest(message)        => Json.obj("type" -> Json.fromString("invalid_request"), "message" -> Json.fromString(message))
+    case ServiceError.Unauthorized(message)          => Json.obj("type" -> Json.fromString("unauthorized"), "message" -> Json.fromString(message))
+    case ServiceError.Forbidden(message)             => Json.obj("type" -> Json.fromString("forbidden"), "message" -> Json.fromString(message))
+    case ServiceError.AlreadyHeld(message)           => Json.obj("type" -> Json.fromString("already_held"), "message" -> Json.fromString(message))
+    case ServiceError.LeaseExpired(message)          => Json.obj("type" -> Json.fromString("lease_expired"), "message" -> Json.fromString(message))
+    case ServiceError.LeaseMismatch(message)         => Json.obj("type" -> Json.fromString("lease_mismatch"), "message" -> Json.fromString(message))
+    case ServiceError.NotFound(message)              => Json.obj("type" -> Json.fromString("not_found"), "message" -> Json.fromString(message))
+    case ServiceError.QuotaExceeded(message)         => Json.obj("type" -> Json.fromString("quota_exceeded"), "message" -> Json.fromString(message))
+    case ServiceError.NotLeader(message, leaderHint) => Json.obj("type" -> Json.fromString("not_leader"), "message" -> Json.fromString(message), "leader_hint" -> leaderHint.asJson)
   }
 
   private val commandDecoder: Decoder[ReplicatedCommand] = Decoder.instance { cursor =>
@@ -175,7 +182,7 @@ object RaftTransitions:
       val next = if granted then termAdjusted.copy(votedFor = Some(request.candidateId), lastHeartbeatMillis = now) else termAdjusted.copy(lastHeartbeatMillis = now)
       next -> VoteResponse(next.currentTerm, granted)
 
-  def handleAppendEntries(state: RaftRuntimeState, request: AppendEntriesRequest, now: Long): (RaftRuntimeState, AppendEntriesResponse) =
+  def handleAppendEntries(state: RaftRuntimeState, request: AppendEntriesRequest, now: Long, quotas: TenantQuotaRegistry = TenantQuotaRegistry.default): (RaftRuntimeState, AppendEntriesResponse) =
     if request.term < state.currentTerm then state -> AppendEntriesResponse(state.currentTerm, success = false, state.log.lastOption.map(_.index).getOrElse(0L))
     else
       val base =
@@ -192,7 +199,7 @@ object RaftTransitions:
         val nextLog = if request.entries.isEmpty then base.log else prefix ++ request.entries
         val cappedCommit = math.min(request.leaderCommit, nextLog.lastOption.map(_.index).getOrElse(base.commitIndex))
         val entriesToApply = nextLog.filter(entry => entry.index > base.lastApplied && entry.index <= cappedCommit).sortBy(_.index)
-        val materialized = entriesToApply.foldLeft(base.materialized) { case (acc, entry) => LeaseMaterializer.applyCommand(acc, entry.command) }
+        val materialized = entriesToApply.foldLeft(base.materialized) { case (acc, entry) => LeaseMaterializer.applyCommand(acc, entry.command, quotas) }
         val next = base.copy(log = nextLog, commitIndex = cappedCommit, lastApplied = math.max(base.lastApplied, cappedCommit), materialized = materialized)
         next -> AppendEntriesResponse(next.currentTerm, success = true, next.log.lastOption.map(_.index).getOrElse(0L))
 
@@ -218,10 +225,10 @@ trait RaftNode[F[_]]:
   def shutdown: F[Unit]
 
 object RaftNode:
-  def resource[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F]): Resource[F, RaftNode[F]] =
-    Resource.make(create(config, persistence))(_.shutdown).widen
+  def resource[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F], quotas: TenantQuotaRegistry = TenantQuotaRegistry.default): Resource[F, RaftNode[F]] =
+    Resource.make(create(config, persistence, quotas))(_.shutdown).widen
 
-  private def create[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F]): F[LiveRaftNode[F]] =
+  private def create[F[_]: Async](config: ClusterConfig, persistence: RaftPersistence[F], quotas: TenantQuotaRegistry): F[LiveRaftNode[F]] =
     for
       persisted <- persistence.load
       nowMillis <- Temporal[F].realTime.map(_.toMillis)
@@ -234,7 +241,7 @@ object RaftNode:
           log = persisted.entries,
           commitIndex = persisted.metadata.commitIndex,
           lastApplied = persisted.metadata.commitIndex,
-          materialized = replayCommitted(persisted.entries, persisted.metadata.commitIndex),
+          materialized = replayCommitted(persisted.entries, persisted.metadata.commitIndex, quotas),
           lastHeartbeatMillis = nowMillis,
           lastQuorumAckMillis = 0L,
           peerProgress = Map.empty
@@ -243,13 +250,13 @@ object RaftNode:
       mutex <- Mutex[F]
       serverRef <- Ref.of[F, Option[ServerSocket]](None)
       fibersRef <- Ref.of[F, List[Fiber[F, Throwable, Unit]]](Nil)
-      node = new LiveRaftNode[F](config, persistence, stateRef, mutex, serverRef, fibersRef)
+      node = new LiveRaftNode[F](config, persistence, stateRef, mutex, serverRef, fibersRef, quotas)
       _ <- node.start
     yield node
 
-  private def replayCommitted(entries: Vector[RaftLogEntry], commitIndex: Long): ServiceState =
+  private def replayCommitted(entries: Vector[RaftLogEntry], commitIndex: Long, quotas: TenantQuotaRegistry): ServiceState =
     entries.filter(_.index <= commitIndex).sortBy(_.index).foldLeft(ServiceState.empty) { case (state, entry) =>
-      LeaseMaterializer.applyCommand(state, entry.command)
+      LeaseMaterializer.applyCommand(state, entry.command, quotas)
     }
 
 private final class LiveRaftNode[F[_]: Async](
@@ -258,7 +265,8 @@ private final class LiveRaftNode[F[_]: Async](
     stateRef: Ref[F, RaftRuntimeState],
     mutex: Mutex[F],
     serverRef: Ref[F, Option[ServerSocket]],
-    fibersRef: Ref[F, List[Fiber[F, Throwable, Unit]]]
+    fibersRef: Ref[F, List[Fiber[F, Throwable, Unit]]],
+    quotas: TenantQuotaRegistry
 ) extends RaftNode[F]:
   override val nodeId: String = config.nodeId
 
@@ -463,7 +471,7 @@ private final class LiveRaftNode[F[_]: Async](
     for
       updated <- stateRef.modify { state =>
         val entriesToApply = state.log.filter(entry => entry.index > state.lastApplied && entry.index <= index).sortBy(_.index)
-        val materialized = entriesToApply.foldLeft(state.materialized) { case (acc, entry) => LeaseMaterializer.applyCommand(acc, entry.command) }
+        val materialized = entriesToApply.foldLeft(state.materialized) { case (acc, entry) => LeaseMaterializer.applyCommand(acc, entry.command, quotas) }
         val next = state.copy(commitIndex = index, lastApplied = index, materialized = materialized)
         next -> next
       }
@@ -513,7 +521,7 @@ private final class LiveRaftNode[F[_]: Async](
     mutex.lock.surround {
       for
         now <- Temporal[F].realTime.map(_.toMillis)
-        response <- stateRef.modify(state => RaftTransitions.handleAppendEntries(state, request, now))
+        response <- stateRef.modify(state => RaftTransitions.handleAppendEntries(state, request, now, quotas))
         current <- stateRef.get
         _ <- persistence.overwriteEntries(current.log)
         _ <- persistence.saveMetadata(PersistedMetadata(current.currentTerm, current.votedFor, current.commitIndex))

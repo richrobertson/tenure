@@ -3,6 +3,7 @@ package com.richrobertson.tenure.service
 import cats.effect.kernel.Resource
 import cats.effect.IO
 import cats.syntax.all.*
+import com.richrobertson.tenure.auth.Principal
 import com.richrobertson.tenure.model.{LeaseStatus, ResourceId, TenantId}
 import com.richrobertson.tenure.persistence.RaftPersistence
 import com.richrobertson.tenure.raft.{ClusterConfig, NodeRole, PeerNode, PersistedMetadata, RaftLogEntry, RaftNode}
@@ -20,6 +21,7 @@ class RaftIntegrationSpec extends CatsEffectSuite:
   private val appliedAt = Instant.parse("2026-03-21T12:00:00Z")
   private val tenantId = TenantId("tenant-a")
   private val resourceId = ResourceId("resource-1")
+  private val principal = Principal("user-a", tenantId)
 
   override val munitTimeout: FiniteDuration = 60.seconds
 
@@ -31,21 +33,21 @@ class RaftIntegrationSpec extends CatsEffectSuite:
           initialLeaderService = cluster.service(initialLeader.nodeId)
           initialFollower = cluster.nodes.find(_.nodeId != initialLeader.nodeId).getOrElse(fail("expected a follower in a three-node cluster"))
           followerService = cluster.service(initialFollower.nodeId)
-          followerRead <- followerService.getLease(tenantId, resourceId)
+          followerRead <- followerService.getLease(GetLeaseRequest(principal, tenantId.value, resourceId.value))
           _ = assert(followerRead.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
-          acquire <- initialLeaderService.acquire(AcquireRequest(tenantId.value, resourceId.value, "holder-1", 15, "req-1"))
+          acquire <- initialLeaderService.acquire(AcquireRequest(principal, tenantId.value, resourceId.value, "holder-1", 15, "req-1"))
           _ = assert(acquire.isRight)
           _ <- awaitLeaseStatus(cluster.nodes, LeaseStatus.Active)
           _ <- initialLeader.shutdown
           replacementLeader <- awaitLeader(cluster.nodes.filterNot(_.nodeId == initialLeader.nodeId))
           _ = assertNotEquals(replacementLeader.nodeId, initialLeader.nodeId)
           replacementService = cluster.service(replacementLeader.nodeId)
-          afterFailover <- replacementService.getLease(tenantId, resourceId)
+          afterFailover <- replacementService.getLease(GetLeaseRequest(principal, tenantId.value, resourceId.value))
           _ = assertEquals(afterFailover.toOption.map(_.lease.status), Some(LeaseStatus.Active))
           restarted <- allocateNode(cluster.configs(initialLeader.nodeId), cluster.dataDirs(initialLeader.nodeId))
           (releaseRestarted, restartedNode) = restarted
           _ <- awaitFollowerView(restartedNode, LeaseStatus.Active)
-          release <- replacementService.release(ReleaseRequest(tenantId.value, resourceId.value, leaseId(acquire), "holder-1", "req-2"))
+          release <- replacementService.release(ReleaseRequest(principal, tenantId.value, resourceId.value, leaseId(acquire), "holder-1", "req-2"))
           _ = assert(release.isRight)
           _ <- awaitLeaseStatus(cluster.nodes.filterNot(_.nodeId == initialLeader.nodeId) :+ restartedNode, LeaseStatus.Released)
           _ <- releaseRestarted
@@ -80,7 +82,7 @@ class RaftIntegrationSpec extends CatsEffectSuite:
       _ <- persistence.saveMetadata(PersistedMetadata(currentTerm = 3L, votedFor = Some("node-1"), commitIndex = 2L))
       loaded <- persistence.load
       replayed = loaded.entries.filter(_.index <= loaded.metadata.commitIndex).sortBy(_.index).foldLeft(ServiceState.empty) { case (state, entry) =>
-        LeaseMaterializer.applyCommand(state, entry.command)
+        LeaseMaterializer.applyCommand(state, entry.command, com.richrobertson.tenure.quota.TenantQuotaRegistry.default)
       }
       leaseView = replayed.leaseState.viewAt(resourceKey, appliedAt.plusSeconds(10))
     yield

@@ -6,6 +6,9 @@ import java.time.Instant
 final case class LeaseState(leases: Map[ResourceKey, LeaseRecord]):
   def get(resourceKey: ResourceKey): Option[LeaseRecord] = leases.get(resourceKey)
 
+  def activeLeaseCount(tenantId: TenantId, at: Instant): Int =
+    leases.values.count(record => record.resourceKey.tenantId == tenantId && record.isActiveAt(at))
+
   def viewAt(resourceKey: ResourceKey, at: Instant): LeaseView =
     get(resourceKey).map(LeaseView.fromRecord(_, at)).getOrElse(LeaseView.absent(resourceKey))
 
