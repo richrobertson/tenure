@@ -126,8 +126,8 @@ class RaftIntegrationSpec extends CatsEffectSuite:
 
   private def awaitLeaseStatus(nodes: List[RaftNode[IO]], expected: LeaseStatus): IO[Unit] =
     eventually(s"lease status $expected across cluster") {
-      nodes.traverse(_.readState).map { states =>
-        val statuses = states.map(_.leaseState.viewAt(com.richrobertson.tenure.model.ResourceKey(tenantId, resourceId), appliedAt.plusSeconds(10)).status)
+      nodes.traverse(nodeLeaseRecord).map { records =>
+        val statuses = records.map(recordStatus)
         if statuses.forall(_ == expected) then ()
         else throw new IllegalStateException(s"expected all statuses to be $expected, found $statuses")
       }
@@ -135,11 +135,19 @@ class RaftIntegrationSpec extends CatsEffectSuite:
 
   private def awaitFollowerView(node: RaftNode[IO], expected: LeaseStatus): IO[Unit] =
     eventually(s"restarted follower catch-up to $expected") {
-      node.readState.map(_.leaseState.viewAt(com.richrobertson.tenure.model.ResourceKey(tenantId, resourceId), appliedAt.plusSeconds(10)).status).flatMap { status =>
+      nodeLeaseRecord(node).flatMap { record =>
+        val status = recordStatus(record)
         if status == expected then IO.unit
         else IO.raiseError(new IllegalStateException(s"expected restarted follower status $expected, found $status"))
       }
     }
+
+
+  private def nodeLeaseRecord(node: RaftNode[IO]): IO[Option[com.richrobertson.tenure.model.LeaseRecord]] =
+    node.readState.map(_.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, resourceId)))
+
+  private def recordStatus(record: Option[com.richrobertson.tenure.model.LeaseRecord]): LeaseStatus =
+    record.fold(LeaseStatus.Available)(_.status)
 
   private def eventually[A](label: String, timeout: FiniteDuration = 8.seconds, interval: FiniteDuration = 200.millis)(thunk: IO[A]): IO[A] =
     IO.monotonic.flatMap { start =>
