@@ -46,10 +46,24 @@ class LeaseStateMachineSpec extends FunSuite:
     assert(renewed.isRight)
   }
 
+  test("renew fails after authoritative expiry") {
+    val leaseId = LeaseId(UUID.randomUUID())
+    val state = successfulState(LeaseStateMachine.transition(LeaseState.empty, Acquire(keyA, holder, 5, leaseId), start))
+    val renewed = LeaseStateMachine.transition(state, Renew(keyA, leaseId, holder, 30), start.plusSeconds(5))
+    assertEquals(renewed.left.toOption, Some(LeaseError.LeaseExpired(keyA)))
+  }
+
   test("renew fails for wrong holder") {
     val leaseId = LeaseId(UUID.randomUUID())
     val state = successfulState(LeaseStateMachine.transition(LeaseState.empty, Acquire(keyA, holder, 15, leaseId), start))
     val renewed = LeaseStateMachine.transition(state, Renew(keyA, leaseId, otherHolder, 30), start.plusSeconds(10))
+    assert(renewed.left.exists(_.isInstanceOf[LeaseError.LeaseMismatch]))
+  }
+
+  test("renew fails for wrong lease id") {
+    val leaseId = LeaseId(UUID.randomUUID())
+    val state = successfulState(LeaseStateMachine.transition(LeaseState.empty, Acquire(keyA, holder, 15, leaseId), start))
+    val renewed = LeaseStateMachine.transition(state, Renew(keyA, LeaseId(UUID.randomUUID()), holder, 30), start.plusSeconds(10))
     assert(renewed.left.exists(_.isInstanceOf[LeaseError.LeaseMismatch]))
   }
 
@@ -65,6 +79,19 @@ class LeaseStateMachineSpec extends FunSuite:
     val state = successfulState(LeaseStateMachine.transition(LeaseState.empty, Acquire(keyA, holder, 15, leaseId), start))
     val released = LeaseStateMachine.transition(state, Release(keyA, leaseId, otherHolder), start.plusSeconds(2))
     assert(released.left.exists(_.isInstanceOf[LeaseError.LeaseMismatch]))
+  }
+
+  test("released and expired leases remain materialized in authoritative views") {
+    val leaseId = LeaseId(UUID.randomUUID())
+    val activeState = successfulState(LeaseStateMachine.transition(LeaseState.empty, Acquire(keyA, holder, 5, leaseId), start))
+    val activeView = activeState.viewAt(keyA, start.plusSeconds(4))
+    val expiredView = activeState.viewAt(keyA, start.plusSeconds(5))
+    val releasedState = successfulState(LeaseStateMachine.transition(activeState, Release(keyA, leaseId, holder), start.plusSeconds(1)))
+    val releasedView = releasedState.viewAt(keyA, start.plusSeconds(2))
+
+    assertEquals(activeView.status, LeaseStatus.Active)
+    assertEquals(expiredView.status, LeaseStatus.Expired)
+    assertEquals(releasedView.status, LeaseStatus.Released)
   }
 
   test("tenant scoping keeps same resource id independent") {

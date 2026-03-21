@@ -277,16 +277,15 @@ private final case class LocalLeaseService[F[_]: Async](stateRef: Ref[F, Service
     clock.now.flatMap { now =>
       stateRef.get.map { current =>
         val resourceKey = ResourceKey(tenantId, resourceId)
-        current.leaseState.get(resourceKey) match
-          case Some(record) => Right(GetLeaseResult(found = true, lease = LeaseView.fromRecord(record, now)))
-          case None         => Right(GetLeaseResult(found = false, lease = LeaseView.absent(resourceKey)))
+        val lease = current.leaseState.viewAt(resourceKey, now)
+        Right(GetLeaseResult(found = lease.status != LeaseStatus.Absent, lease = lease))
       }
     }
 
   override def listLeases(tenantId: TenantId): F[Either[ServiceError, ListLeasesResult]] =
     clock.now.flatMap { now =>
       stateRef.get.map { current =>
-        Right(ListLeasesResult(current.leaseState.leases.values.toList.filter(_.resourceKey.tenantId == tenantId).sortBy(_.resourceKey.resourceId.value).map(LeaseView.fromRecord(_, now))))
+        Right(ListLeasesResult(current.leaseState.tenantViewsAt(tenantId, now)))
       }
     }
 
@@ -345,9 +344,8 @@ private final case class ReplicatedLeaseService[F[_]: Async](raftNode: RaftNode[
         clock.now.flatMap { now =>
           raftNode.readState.map { current =>
             val resourceKey = ResourceKey(tenantId, resourceId)
-            current.leaseState.get(resourceKey) match
-              case Some(record) => Right(GetLeaseResult(found = true, lease = LeaseView.fromRecord(record, now)))
-              case None         => Right(GetLeaseResult(found = false, lease = LeaseView.absent(resourceKey)))
+            val lease = current.leaseState.viewAt(resourceKey, now)
+            Right(GetLeaseResult(found = lease.status != LeaseStatus.Absent, lease = lease))
           }
         }
       else raftNode.leaderHint.map(hint => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not authoritative for reads", hint)))
@@ -358,7 +356,7 @@ private final case class ReplicatedLeaseService[F[_]: Async](raftNode: RaftNode[
       if authoritative then
         clock.now.flatMap { now =>
           raftNode.readState.map { current =>
-            Right(ListLeasesResult(current.leaseState.leases.values.toList.filter(_.resourceKey.tenantId == tenantId).sortBy(_.resourceKey.resourceId.value).map(LeaseView.fromRecord(_, now))))
+            Right(ListLeasesResult(current.leaseState.tenantViewsAt(tenantId, now)))
           }
         }
       else raftNode.leaderHint.map(hint => Left(ServiceError.NotLeader(s"node ${raftNode.nodeId} is not authoritative for reads", hint)))

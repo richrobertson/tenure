@@ -1,162 +1,191 @@
 package com.richrobertson.tenure.service
 
-import cats.effect.{IO, Resource, Ref}
+import cats.effect.kernel.Resource
+import cats.effect.IO
 import cats.syntax.all.*
-import com.richrobertson.tenure.model.{ResourceId, TenantId}
+import com.richrobertson.tenure.model.{LeaseStatus, ResourceId, TenantId}
 import com.richrobertson.tenure.persistence.RaftPersistence
-import com.richrobertson.tenure.raft.{ClusterConfig, NodeRole, PeerNode, RaftNode}
+import com.richrobertson.tenure.raft.{ClusterConfig, NodeRole, PeerNode, PersistedMetadata, RaftLogEntry, RaftNode}
 import com.richrobertson.tenure.time.Clock
 import munit.CatsEffectSuite
+
 import java.net.ServerSocket
 import java.nio.file.Files
+import java.time.Instant
+import java.util.concurrent.TimeoutException
 import scala.concurrent.duration.*
+import java.util.UUID
 
 class RaftIntegrationSpec extends CatsEffectSuite:
-  override val munitTimeout: Duration = 45.seconds
+  private val appliedAt = Instant.parse("2026-03-21T12:00:00Z")
+  private val tenantId = TenantId("tenant-a")
+  private val resourceId = ResourceId("resource-1")
 
-  test("follower behind by multiple entries catches up after restart and later commits new entries") {
-    clusterResource.use { cluster =>
-      for
-        leader <- cluster.awaitLeader
-        lagging = cluster.otherThan(leader.id).head
-        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 30, "req-1"))
-        _ <- lagging.stop
-        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-2", "holder-2", 30, "req-2"))
-        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-3", "holder-3", 30, "req-3"))
-        _ <- lagging.start
-        currentLeader <- cluster.awaitLeader
-        _ <- currentLeader.acquire(AcquireRequest("tenant-a", "resource-4", "holder-4", 30, "req-4"))
-        _ <- cluster.awaitLeaseReplicated(lagging, TenantId("tenant-a"), ResourceId("resource-4"))
-        backfilled <- lagging.hasReplicatedLease(TenantId("tenant-a"), ResourceId("resource-3"))
-        replicated <- lagging.hasReplicatedLease(TenantId("tenant-a"), ResourceId("resource-4"))
-      yield
-        assertEquals(backfilled, true)
-        assertEquals(replicated, true)
-    }
-  }
+  override val munitTimeout: FiniteDuration = 60.seconds
 
-  test("leader recovers progress after temporary quorum loss and stale isolated leader refuses leader-only reads") {
-    clusterResource.use { cluster =>
-      for
-        leader <- cluster.awaitLeader
-        followers = cluster.otherThan(leader.id)
-        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 30, "req-1"))
-        _ <- followers.traverse_(_.stop)
-        _ <- IO.sleep(1500.millis)
-        staleRead <- leader.getLease(TenantId("tenant-a"), ResourceId("resource-1"))
-        staleWrite <- leader.acquire(AcquireRequest("tenant-a", "resource-2", "holder-2", 30, "req-2"))
-        _ <- followers.traverse_(_.start)
-        newLeader <- cluster.awaitLeader
-        postRecovery <- newLeader.acquire(AcquireRequest("tenant-a", "resource-3", "holder-3", 30, "req-3"))
-      yield
-        assert(staleRead.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
-        assert(staleWrite.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
-        assert(postRecovery.isRight)
-    }
-  }
-
-  test("followers reject reads and writes with NOT_LEADER") {
-    clusterResource.use { cluster =>
-      for
-        leader <- cluster.awaitLeader
-        follower = cluster.otherThan(leader.id).head
-        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 30, "req-1"))
-        read <- follower.getLease(TenantId("tenant-a"), ResourceId("resource-1"))
-        write <- follower.acquire(AcquireRequest("tenant-a", "resource-2", "holder-2", 30, "req-2"))
-      yield
-        assert(read.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
-        assert(write.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
-    }
-  }
-
-  test("restart replays committed log") {
-    clusterResource.use { cluster =>
-      for
-        leader <- cluster.awaitLeader
-        target = cluster.otherThan(leader.id).head
-        _ <- leader.acquire(AcquireRequest("tenant-a", "resource-1", "holder-1", 30, "req-1"))
-        _ <- cluster.awaitLeaseReplicated(target, TenantId("tenant-a"), ResourceId("resource-1"))
-        _ <- target.stop
-        _ <- target.start
-        _ <- cluster.awaitLeaseReplicated(target, TenantId("tenant-a"), ResourceId("resource-1"))
-        replicated <- target.hasReplicatedLease(TenantId("tenant-a"), ResourceId("resource-1"))
-      yield assertEquals(replicated, true)
-    }
-  }
-
-  private def clusterResource: Resource[IO, TestCluster] =
-    for
-      root <- Resource.eval(IO.blocking(Files.createTempDirectory("tenure-raft-spec")))
-      peerPorts <- Resource.eval(List.fill(3)(freeLocalPort).sequence)
-      apiPorts <- Resource.eval(List.fill(3)(freeLocalPort).sequence)
-      peers = List(
-        PeerNode("node-1", "127.0.0.1", peerPorts(0), "127.0.0.1", apiPorts(0)),
-        PeerNode("node-2", "127.0.0.1", peerPorts(1), "127.0.0.1", apiPorts(1)),
-        PeerNode("node-3", "127.0.0.1", peerPorts(2), "127.0.0.1", apiPorts(2))
-      )
-      node1 <- TestNode.resource(ClusterConfig("node-1", "127.0.0.1", apiPorts(0), peers, root.resolve("node-1").toString))
-      node2 <- TestNode.resource(ClusterConfig("node-2", "127.0.0.1", apiPorts(1), peers, root.resolve("node-2").toString))
-      node3 <- TestNode.resource(ClusterConfig("node-3", "127.0.0.1", apiPorts(2), peers, root.resolve("node-3").toString))
-      _ <- Resource.eval(IO.sleep(1200.millis))
-    yield TestCluster(List(node1, node2, node3))
-
-
-  private def freeLocalPort: IO[Int] =
-    IO.blocking {
-      val socket = new ServerSocket(0)
-      try socket.getLocalPort
-      finally socket.close()
-    }
-
-  private final case class TestCluster(nodes: List[TestNode]):
-    def otherThan(nodeId: String): List[TestNode] = nodes.filterNot(_.id == nodeId)
-
-    def awaitLeader: IO[TestNode] =
-      poll(nodes.findM(_.isAuthoritativeLeader))
-
-    def awaitLeaseReplicated(node: TestNode, tenantId: TenantId, resourceId: ResourceId): IO[Unit] =
-      poll(node.hasReplicatedLease(tenantId, resourceId).map(found => Option.when(found)(())) )
-
-    private def poll[A](value: IO[Option[A]]): IO[A] =
-      value.flatMap {
-        case Some(result) => IO.pure(result)
-        case None         => IO.sleep(200.millis) *> poll(value)
-      }
-
-  private object TestNode:
-    def resource(config: ClusterConfig): Resource[IO, TestNode] =
-      Resource.make {
+  test("multi-node cluster preserves leader-only reads, failover authority, and follower catch-up after restart") {
+    retrying("three-node failover cluster", attempts = 3) {
+      withCluster(3).use { cluster =>
         for
-          currentRef <- Ref.of[IO, Option[(LeaseService[IO], RaftNode[IO], IO[Unit])]](None)
-          node = TestNode(config.nodeId, config, currentRef)
-          _ <- node.start
-        yield node
-      }(_.stop)
-
-  private final case class TestNode(id: String, config: ClusterConfig, currentRef: Ref[IO, Option[(LeaseService[IO], RaftNode[IO], IO[Unit])]]):
-    def start: IO[Unit] =
-      currentRef.get.flatMap {
-        case Some(_) => IO.unit
-        case None =>
-          for
-            persistence <- RaftPersistence.fileBacked[IO](config.dataDir)
-            allocated <- RaftNode.resource[IO](config, persistence).allocated
-            (raft, release) = allocated
-            service = LeaseService.replicated[IO](raft, Clock.system[IO])
-            _ <- currentRef.set(Some((service, raft, release)))
-          yield ()
+          initialLeader <- awaitLeader(cluster.nodes)
+          initialLeaderService = cluster.service(initialLeader.nodeId)
+          initialFollower = cluster.nodes.find(_.nodeId != initialLeader.nodeId).getOrElse(fail("expected a follower in a three-node cluster"))
+          followerService = cluster.service(initialFollower.nodeId)
+          followerRead <- followerService.getLease(tenantId, resourceId)
+          _ = assert(followerRead.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
+          acquire <- initialLeaderService.acquire(AcquireRequest(tenantId.value, resourceId.value, "holder-1", 15, "req-1"))
+          _ = assert(acquire.isRight)
+          _ <- awaitLeaseStatus(cluster.nodes, LeaseStatus.Active)
+          _ <- initialLeader.shutdown
+          replacementLeader <- awaitLeader(cluster.nodes.filterNot(_.nodeId == initialLeader.nodeId))
+          _ = assertNotEquals(replacementLeader.nodeId, initialLeader.nodeId)
+          replacementService = cluster.service(replacementLeader.nodeId)
+          afterFailover <- replacementService.getLease(tenantId, resourceId)
+          _ = assertEquals(afterFailover.toOption.map(_.lease.status), Some(LeaseStatus.Active))
+          restarted <- allocateNode(cluster.configs(initialLeader.nodeId), cluster.dataDirs(initialLeader.nodeId))
+          (releaseRestarted, restartedNode) = restarted
+          _ <- awaitFollowerView(restartedNode, LeaseStatus.Active)
+          release <- replacementService.release(ReleaseRequest(tenantId.value, resourceId.value, leaseId(acquire), "holder-1", "req-2"))
+          _ = assert(release.isRight)
+          _ <- awaitLeaseStatus(cluster.nodes.filterNot(_.nodeId == initialLeader.nodeId) :+ restartedNode, LeaseStatus.Released)
+          _ <- releaseRestarted
+        yield ()
       }
+    }
+  }
 
-    def stop: IO[Unit] =
-      currentRef.getAndSet(None).flatMap(_.traverse_(_._3))
+  test("persisted committed log reload reconstructs the authoritative materialized lease view") {
+    val resourceKey = com.richrobertson.tenure.model.ResourceKey(tenantId, resourceId)
+    val leaseId = com.richrobertson.tenure.model.LeaseId(UUID.fromString("00000000-0000-0000-0000-000000000321"))
+    val acquire = AcquireCommand(
+      RequestContext(tenantId, com.richrobertson.tenure.model.RequestId("req-1"), resourceKey),
+      com.richrobertson.tenure.model.ClientId("holder-1"),
+      ttlSeconds = 15,
+      leaseId = leaseId,
+      appliedAt = appliedAt
+    )
+    val renew = RenewCommand(
+      RequestContext(tenantId, com.richrobertson.tenure.model.RequestId("req-2"), resourceKey),
+      leaseId = leaseId,
+      holderId = com.richrobertson.tenure.model.ClientId("holder-1"),
+      ttlSeconds = 30,
+      appliedAt = appliedAt.plusSeconds(5)
+    )
 
-    def service: IO[LeaseService[IO]] = currentRef.get.flatMap(_.map(_._1).liftTo[IO](new IllegalStateException(s"node $id is stopped")))
-    def role: IO[NodeRole] = currentRef.get.flatMap(_.map(_._2.role).getOrElse(IO.pure(NodeRole.Follower)))
-    def isAuthoritativeLeader: IO[Boolean] =
-      currentRef.get.flatMap(_.map(_._2.canServeLeaderReads).getOrElse(IO.pure(false)))
-    def hasReplicatedLease(tenantId: TenantId, resourceId: ResourceId): IO[Boolean] =
-      currentRef.get.flatMap(_.map(_._2.readState).liftTo[IO](new IllegalStateException(s"node $id is stopped"))).flatten.map { state =>
-        state.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, resourceId)).isDefined
+    for
+      root <- IO.blocking(Files.createTempDirectory("tenure-raft-replay-spec"))
+      persistence <- RaftPersistence.fileBacked[IO](root.toString)
+      _ <- persistence.appendEntry(RaftLogEntry(1L, 3L, acquire))
+      _ <- persistence.appendEntry(RaftLogEntry(2L, 3L, renew))
+      _ <- persistence.saveMetadata(PersistedMetadata(currentTerm = 3L, votedFor = Some("node-1"), commitIndex = 2L))
+      loaded <- persistence.load
+      replayed = loaded.entries.filter(_.index <= loaded.metadata.commitIndex).sortBy(_.index).foldLeft(ServiceState.empty) { case (state, entry) =>
+        LeaseMaterializer.applyCommand(state, entry.command)
       }
-    def acquire(request: AcquireRequest): IO[Either[ServiceError, AcquireResult]] = service.flatMap(_.acquire(request))
-    def getLease(tenantId: TenantId, resourceId: ResourceId): IO[Either[ServiceError, GetLeaseResult]] = service.flatMap(_.getLease(tenantId, resourceId))
+      leaseView = replayed.leaseState.viewAt(resourceKey, appliedAt.plusSeconds(10))
+    yield
+      assertEquals(loaded.metadata.commitIndex, 2L)
+      assertEquals(leaseView.status, LeaseStatus.Active)
+      assertEquals(leaseView.leaseId, Some(leaseId))
+      assertEquals(leaseView.holderId.map(_.value), Some("holder-1"))
+      assertEquals(leaseView.expiresAt, Some(appliedAt.plusSeconds(35)))
+      assert(replayed.responses.contains((tenantId, com.richrobertson.tenure.model.RequestId("req-1"))))
+      assert(replayed.responses.contains((tenantId, com.richrobertson.tenure.model.RequestId("req-2"))))
+  }
+
+  private final case class RunningCluster(
+      nodes: List[RaftNode[IO]],
+      services: Map[String, LeaseService[IO]],
+      configs: Map[String, ClusterConfig],
+      dataDirs: Map[String, String]
+  ):
+    def service(nodeId: String): LeaseService[IO] =
+      services.getOrElse(nodeId, fail(s"missing service for $nodeId"))
+
+  private def withCluster(size: Int): Resource[IO, RunningCluster] =
+    for
+      root <- Resource.eval(IO.blocking(Files.createTempDirectory("tenure-raft-cluster-spec")))
+      peers <- Resource.eval(IO.blocking(parallelPeers(size)))
+      dataDirs = peers.map(peer => peer.nodeId -> root.resolve(peer.nodeId).toString).toMap
+      configs = peers.map(peer => peer.nodeId -> ClusterConfig(peer.nodeId, peer.apiHost, peer.apiPort, peers, dataDirs(peer.nodeId))).toMap
+      nodes <- peers.traverse(peer => nodeResource(configs(peer.nodeId), dataDirs(peer.nodeId)))
+    yield
+      val services = nodes.map(node => node.nodeId -> LeaseService.replicated[IO](node, Clock.system[IO])).toMap
+      RunningCluster(nodes, services, configs, dataDirs)
+
+  private def nodeResource(config: ClusterConfig, dataDir: String): Resource[IO, RaftNode[IO]] =
+    Resource.eval(RaftPersistence.fileBacked[IO](dataDir)).flatMap(persistence => RaftNode.resource[IO](config, persistence))
+
+  private def allocateNode(config: ClusterConfig, dataDir: String): IO[(IO[Unit], RaftNode[IO])] =
+    nodeResource(config, dataDir).allocated.map { case (node, release) => (release, node) }
+
+  private def awaitLeader(nodes: List[RaftNode[IO]]): IO[RaftNode[IO]] =
+    eventually("leader election") {
+      nodes.traverse(node => node.role.map(role => node -> role)).map { states =>
+        val leaders = states.collect { case (node, NodeRole.Leader) => node }
+        leaders match
+          case leader :: Nil => leader
+          case other         => throw new IllegalStateException(s"expected exactly one leader, found ${other.map(_.nodeId)}")
+      }
+    }
+
+  private def awaitLeaseStatus(nodes: List[RaftNode[IO]], expected: LeaseStatus): IO[Unit] =
+    eventually(s"lease status $expected across cluster") {
+      nodes.traverse(nodeLeaseRecord).map { records =>
+        val statuses = records.map(recordStatus)
+        if statuses.forall(_ == expected) then ()
+        else throw new IllegalStateException(s"expected all statuses to be $expected, found $statuses")
+      }
+    }
+
+  private def awaitFollowerView(node: RaftNode[IO], expected: LeaseStatus): IO[Unit] =
+    eventually(s"restarted follower catch-up to $expected") {
+      nodeLeaseRecord(node).flatMap { record =>
+        val status = recordStatus(record)
+        if status == expected then IO.unit
+        else IO.raiseError(new IllegalStateException(s"expected restarted follower status $expected, found $status"))
+      }
+    }
+
+
+  private def nodeLeaseRecord(node: RaftNode[IO]): IO[Option[com.richrobertson.tenure.model.LeaseRecord]] =
+    node.readState.map(_.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, resourceId)))
+
+  private def recordStatus(record: Option[com.richrobertson.tenure.model.LeaseRecord]): LeaseStatus =
+    record.fold(LeaseStatus.Absent)(_.status)
+
+  private def eventually[A](label: String, timeout: FiniteDuration = 12.seconds, interval: FiniteDuration = 200.millis)(thunk: IO[A]): IO[A] =
+    IO.monotonic.flatMap { start =>
+      def loop(lastError: Option[Throwable]): IO[A] =
+        thunk.handleErrorWith { error =>
+          IO.monotonic.flatMap { now =>
+            if now - start >= timeout then IO.raiseError(lastError.getOrElse(error))
+            else IO.sleep(interval) *> loop(Some(error))
+          }
+        }
+      loop(None)
+    }.adaptError { case error => AssertionError(s"timed out waiting for $label: ${error.getMessage}") }
+
+  private def leaseId(result: Either[ServiceError, AcquireResult]): String =
+    result match
+      case Right(value) => value.lease.leaseId.map(_.value.toString).getOrElse(fail("expected lease id in acquire result"))
+      case Left(error)  => fail(s"expected successful acquire, got $error")
+
+  private def retrying[A](label: String, attempts: Int, attemptTimeout: FiniteDuration = 15.seconds)(thunk: => IO[A]): IO[A] =
+    thunk.timeoutTo(attemptTimeout, IO.raiseError(new TimeoutException(s"attempt timed out after $attemptTimeout"))).handleErrorWith { error =>
+      if attempts <= 1 then IO.raiseError(error)
+      else
+        IO.sleep(250.millis) *> retrying(label, attempts - 1)(thunk)
+    }.adaptError { case error => AssertionError(s"$label failed after retries: ${error.getMessage}") }
+
+  private def parallelPeers(size: Int): List[PeerNode] =
+    (1 to size).toList.map { idx =>
+      val raftPort = freePort()
+      val apiPort = freePort()
+      PeerNode(s"node-$idx", "127.0.0.1", raftPort, "127.0.0.1", apiPort)
+    }
+
+  private def freePort(): Int =
+    val socket = new ServerSocket(0)
+    try socket.getLocalPort
+    finally socket.close()

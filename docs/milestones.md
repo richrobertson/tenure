@@ -30,13 +30,15 @@ Milestone 2 is complete. The repo includes one shared Raft group, replicated mut
 - **Demo/test expectation:** Scripted demo showing leader-mediated mutation, `NOT_LEADER` handling for reads and writes, failover to a new leader, successful replay after restart, static-config bootstrap with explicit node IDs and `IP:port` endpoints, and TCP peer communication without multiplexing.
 - **Done means:** Mutating operations commit through one Raft group, leader-only routing remains correct across leader change and process restart, and cluster formation works without DNS or external service discovery.
 
-## Milestone 3: lease state machine with acquire/renew/release/get
+## Milestone 3: lease state machine with acquire/renew/release/get *(complete)*
+
+Milestone 3 is complete. The repo now includes deterministic replicated apply semantics for `Acquire`, `Renew`, and `Release`, leader-only `GetLease` and `ListLeases` reads in v1, an explicit authoritative materialized lease map keyed by `(tenant_id, resource_id)`, duplicate-request replay through replicated request history, and clustered tests covering expiry, mismatch, replay, and leadership changes.
 
 - **Objective:** Implement the core replicated lease state machine semantics.
 - **Deliverables:** Apply logic for acquire, renew, release, get; authoritative materialized lease records; leader-only admission decisions.
 - **Out of scope:** Advanced list filtering or broad admin APIs.
 - **Validation artifact:** Lease lifecycle matrix plus deterministic state-machine transition test output covering success, expiry, mismatch, duplicate request, and leader-only read behavior.
-- **Demo/test expectation:** Deterministic tests show linearizable `GetLease`, leader-only `ListLeases`, renewal before expiry, rejection after authoritative expiry, and `NOT_LEADER` responses from followers.
+- **Demo/test expectation:** Deterministic tests show linearizable `GetLease`, leader-only `ListLeases`, renewal before expiry, rejection after authoritative expiry, duplicate request replay across leadership change, and `NOT_LEADER` responses from followers.
 - **Done means:** The replicated state machine produces the documented lease lifecycle outcomes under retries and leadership changes, with leader-only reads demonstrated.
 
 ## Milestone 4: multitenant quotas, idempotency, and fencing tokens

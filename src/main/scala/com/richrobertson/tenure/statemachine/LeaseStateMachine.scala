@@ -6,6 +6,15 @@ import java.time.Instant
 final case class LeaseState(leases: Map[ResourceKey, LeaseRecord]):
   def get(resourceKey: ResourceKey): Option[LeaseRecord] = leases.get(resourceKey)
 
+  def viewAt(resourceKey: ResourceKey, at: Instant): LeaseView =
+    get(resourceKey).map(LeaseView.fromRecord(_, at)).getOrElse(LeaseView.absent(resourceKey))
+
+  def tenantViewsAt(tenantId: TenantId, at: Instant): List[LeaseView] =
+    leases.values.toList
+      .filter(_.resourceKey.tenantId == tenantId)
+      .sortBy(_.resourceKey.resourceId.value)
+      .map(LeaseView.fromRecord(_, at))
+
 object LeaseState:
   val empty: LeaseState = LeaseState(Map.empty)
 
