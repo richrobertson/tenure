@@ -1,6 +1,6 @@
 # Milestone 2 local clustered demo
 
-Milestone 2 moves the prototype from a single in-memory node to a small static-config cluster with one shared Raft group. The implementation keeps mutating lease commands (`Acquire`, `Renew`, `Release`) behind an explicit Raft boundary, persists local term/vote/log metadata to disk, and uses simple TCP peer RPCs without multiplexing. This demo document describes the intended local run flow, but milestone status should remain in progress because the latest `sbt test` run in this environment still fails in `RaftIntegrationSpec`.
+Milestone 2 moves the prototype from a single in-memory node to a small static-config cluster with one shared Raft group. The implementation keeps mutating lease commands (`Acquire`, `Renew`, `Release`) behind an explicit Raft boundary, persists local term/vote/log metadata to disk, and uses simple TCP peer RPCs without multiplexing. This demo document describes the local run flow for the now-complete milestone.
 
 ## What this demo proves
 

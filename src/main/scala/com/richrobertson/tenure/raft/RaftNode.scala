@@ -353,7 +353,7 @@ private final class LiveRaftNode[F[_]: Async](
       val tick =
         if state.role == NodeRole.Leader then
           replicateToQuorum(state).flatMap { result =>
-            if result.authoritative then Async[F].unit
+            if result.quorumAcknowledged || result.authoritative then Async[F].unit
             else stepDown(state.currentTerm, None)
           }
         else Async[F].unit
@@ -404,7 +404,7 @@ private final class LiveRaftNode[F[_]: Async](
       )
     }
 
-  private final case class ReplicationOutcome(authoritative: Boolean)
+  private final case class ReplicationOutcome(authoritative: Boolean, quorumAcknowledged: Boolean)
 
   private def replicateToQuorum(initialState: RaftRuntimeState): F[ReplicationOutcome] =
     for
@@ -420,7 +420,7 @@ private final class LiveRaftNode[F[_]: Async](
         else Async[F].unit
       refreshed <- stateRef.get
       authoritative <- canServeLeaderReadsFromState(refreshed)
-    yield ReplicationOutcome(authoritative)
+    yield ReplicationOutcome(authoritative, successes >= config.majority)
 
   private def replicateToPeer(term: Long, peer: PeerNode): F[Boolean] =
     stateRef.get.flatMap { state =>
@@ -521,7 +521,17 @@ private final class LiveRaftNode[F[_]: Async](
   private def stepDown(term: Long, leaderId: Option[String]): F[Unit] =
     for
       now <- Temporal[F].realTime.map(_.toMillis)
-      _ <- stateRef.update(_.copy(currentTerm = term, role = NodeRole.Follower, leaderId = leaderId, lastHeartbeatMillis = now, lastQuorumAckMillis = 0L))
+      _ <- stateRef.update { state =>
+        state.copy(
+          currentTerm = term,
+          votedFor = Option.when(term == state.currentTerm)(state.votedFor).flatten,
+          role = NodeRole.Follower,
+          leaderId = leaderId,
+          lastHeartbeatMillis = now,
+          lastQuorumAckMillis = 0L,
+          peerProgress = Map.empty
+        )
+      }
       current <- stateRef.get
       _ <- persistence.saveMetadata(PersistedMetadata(current.currentTerm, current.votedFor, current.commitIndex))
     yield ()
