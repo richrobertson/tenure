@@ -142,13 +142,13 @@ class LeaseServiceSpec extends CatsEffectSuite:
     val resourceKey = com.richrobertson.tenure.model.ResourceKey(tenantA, ResourceId("resource-1"))
     val leaseId1 = com.richrobertson.tenure.model.LeaseId(java.util.UUID.fromString("00000000-0000-0000-0000-000000000123"))
     val leaseId2 = com.richrobertson.tenure.model.LeaseId(java.util.UUID.fromString("00000000-0000-0000-0000-000000000124"))
-    val acquire1 = AcquireCommand(RequestContext(tenantA, com.richrobertson.tenure.model.RequestId("req-1"), resourceKey), com.richrobertson.tenure.model.ClientId("holder-1"), 5, leaseId1, start)
-    val retry1 = AcquireCommand(RequestContext(tenantA, com.richrobertson.tenure.model.RequestId("req-1"), resourceKey), com.richrobertson.tenure.model.ClientId("holder-1"), 5, leaseId2, start.plusSeconds(1))
-    val acquire2 = AcquireCommand(RequestContext(tenantA, com.richrobertson.tenure.model.RequestId("req-2"), resourceKey), com.richrobertson.tenure.model.ClientId("holder-2"), 5, leaseId2, start.plusSeconds(5))
     val quotas = TenantQuotaRegistry.default
+    val acquire1 = AcquireCommand(RequestContext(tenantA, com.richrobertson.tenure.model.RequestId("req-1"), resourceKey), com.richrobertson.tenure.model.ClientId("holder-1"), 5, leaseId1, quotas.defaultPolicy, start)
+    val retry1 = AcquireCommand(RequestContext(tenantA, com.richrobertson.tenure.model.RequestId("req-1"), resourceKey), com.richrobertson.tenure.model.ClientId("holder-1"), 5, leaseId2, quotas.defaultPolicy, start.plusSeconds(1))
+    val acquire2 = AcquireCommand(RequestContext(tenantA, com.richrobertson.tenure.model.RequestId("req-2"), resourceKey), com.richrobertson.tenure.model.ClientId("holder-2"), 5, leaseId2, quotas.defaultPolicy, start.plusSeconds(5))
 
     val replayed = List(acquire1, retry1, acquire2).foldLeft(ServiceState.empty) { case (state, command) =>
-      LeaseMaterializer.applyCommand(state, command, quotas)
+      LeaseMaterializer.applyCommand(state, command)
     }
 
     val storedRetry = replayed.responses((tenantA, com.richrobertson.tenure.model.RequestId("req-1"))).result
@@ -157,6 +157,28 @@ class LeaseServiceSpec extends CatsEffectSuite:
     assertEquals(LeaseMaterializer.replayAcquire(storedRetry).flatMap(_.toOption).map(_.lease.leaseId), Some(Some(leaseId1)))
     assertEquals(latestView.fencingToken, 2L)
     assertEquals(latestView.holderId.map(_.value), Some("holder-2"))
+  }
+
+
+  test("replaying committed commands uses the quota policy captured at commit time") {
+    val resourceKey1 = com.richrobertson.tenure.model.ResourceKey(tenantA, ResourceId("resource-1"))
+    val resourceKey2 = com.richrobertson.tenure.model.ResourceKey(tenantA, ResourceId("resource-2"))
+    val permissivePolicy = TenantQuotaPolicy(maxActiveLeases = 2, maxTtlSeconds = 30)
+    val acquire1 = AcquireCommand(RequestContext(tenantA, com.richrobertson.tenure.model.RequestId("req-1"), resourceKey1), com.richrobertson.tenure.model.ClientId("holder-1"), 10, com.richrobertson.tenure.model.LeaseId(java.util.UUID.fromString("00000000-0000-0000-0000-000000000201")), permissivePolicy, start)
+    val acquire2 = AcquireCommand(RequestContext(tenantA, com.richrobertson.tenure.model.RequestId("req-2"), resourceKey2), com.richrobertson.tenure.model.ClientId("holder-2"), 10, com.richrobertson.tenure.model.LeaseId(java.util.UUID.fromString("00000000-0000-0000-0000-000000000202")), permissivePolicy, start.plusSeconds(1))
+    val tightenedRegistry = TenantQuotaRegistry(TenantQuotaPolicy(maxActiveLeases = 1000, maxTtlSeconds = 300), Map(tenantA -> TenantQuotaPolicy(maxActiveLeases = 1, maxTtlSeconds = 5)))
+
+    val authoritative = List(acquire1, acquire2).foldLeft(ServiceState.empty) { case (state, command) =>
+      LeaseMaterializer.applyCommand(state, command)
+    }
+    val replayedAfterQuotaTightening = List(acquire1, acquire2).foldLeft(ServiceState.empty) { case (state, command) =>
+      LeaseMaterializer.applyCommand(state, command)
+    }
+
+    assertEquals(tightenedRegistry.policyFor(tenantA), TenantQuotaPolicy(maxActiveLeases = 1, maxTtlSeconds = 5))
+    assertEquals(authoritative.leaseState.viewAt(resourceKey1, start.plusSeconds(2)).status, LeaseStatus.Active)
+    assertEquals(authoritative.leaseState.viewAt(resourceKey2, start.plusSeconds(2)).status, LeaseStatus.Active)
+    assertEquals(replayedAfterQuotaTightening.leaseState.viewAt(resourceKey2, start.plusSeconds(2)).status, LeaseStatus.Active)
   }
 
   test("replicated service rejects follower writes and reads with NOT_LEADER") {

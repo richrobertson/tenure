@@ -199,7 +199,7 @@ object RaftTransitions:
         val nextLog = if request.entries.isEmpty then base.log else prefix ++ request.entries
         val cappedCommit = math.min(request.leaderCommit, nextLog.lastOption.map(_.index).getOrElse(base.commitIndex))
         val entriesToApply = nextLog.filter(entry => entry.index > base.lastApplied && entry.index <= cappedCommit).sortBy(_.index)
-        val materialized = entriesToApply.foldLeft(base.materialized) { case (acc, entry) => LeaseMaterializer.applyCommand(acc, entry.command, quotas) }
+        val materialized = entriesToApply.foldLeft(base.materialized) { case (acc, entry) => LeaseMaterializer.applyCommand(acc, entry.command) }
         val next = base.copy(log = nextLog, commitIndex = cappedCommit, lastApplied = math.max(base.lastApplied, cappedCommit), materialized = materialized)
         next -> AppendEntriesResponse(next.currentTerm, success = true, next.log.lastOption.map(_.index).getOrElse(0L))
 
@@ -256,7 +256,7 @@ object RaftNode:
 
   private def replayCommitted(entries: Vector[RaftLogEntry], commitIndex: Long, quotas: TenantQuotaRegistry): ServiceState =
     entries.filter(_.index <= commitIndex).sortBy(_.index).foldLeft(ServiceState.empty) { case (state, entry) =>
-      LeaseMaterializer.applyCommand(state, entry.command, quotas)
+      LeaseMaterializer.applyCommand(state, entry.command)
     }
 
 private final class LiveRaftNode[F[_]: Async](
@@ -471,7 +471,7 @@ private final class LiveRaftNode[F[_]: Async](
     for
       updated <- stateRef.modify { state =>
         val entriesToApply = state.log.filter(entry => entry.index > state.lastApplied && entry.index <= index).sortBy(_.index)
-        val materialized = entriesToApply.foldLeft(state.materialized) { case (acc, entry) => LeaseMaterializer.applyCommand(acc, entry.command, quotas) }
+        val materialized = entriesToApply.foldLeft(state.materialized) { case (acc, entry) => LeaseMaterializer.applyCommand(acc, entry.command) }
         val next = state.copy(commitIndex = index, lastApplied = index, materialized = materialized)
         next -> next
       }

@@ -7,6 +7,7 @@ Milestone 4 makes the multitenant contract explicit at the service boundary.
 - transport retries reuse a tenant-scoped `request_id` and replay the original result
 - reusing a `request_id` with different semantics is rejected deterministically
 - per-tenant quotas reject excess active leases and TTLs above policy
+- committed mutating commands carry the quota policy snapshot that admitted them so replay stays deterministic after quota changes
 - cross-tenant access is rejected through an explicit principal-to-tenant authorization check
 - fencing tokens increase on turnover and let downstream systems reject stale writers
 

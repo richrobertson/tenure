@@ -6,6 +6,7 @@ import cats.syntax.all.*
 import com.richrobertson.tenure.auth.Principal
 import com.richrobertson.tenure.model.{LeaseStatus, ResourceId, TenantId}
 import com.richrobertson.tenure.persistence.RaftPersistence
+import com.richrobertson.tenure.quota.TenantQuotaPolicy
 import com.richrobertson.tenure.raft.{ClusterConfig, NodeRole, PeerNode, PersistedMetadata, RaftLogEntry, RaftNode}
 import com.richrobertson.tenure.time.Clock
 import munit.CatsEffectSuite
@@ -64,6 +65,7 @@ class RaftIntegrationSpec extends CatsEffectSuite:
       com.richrobertson.tenure.model.ClientId("holder-1"),
       ttlSeconds = 15,
       leaseId = leaseId,
+      quotaPolicy = TenantQuotaPolicy(maxActiveLeases = 1000, maxTtlSeconds = 15),
       appliedAt = appliedAt
     )
     val renew = RenewCommand(
@@ -71,6 +73,7 @@ class RaftIntegrationSpec extends CatsEffectSuite:
       leaseId = leaseId,
       holderId = com.richrobertson.tenure.model.ClientId("holder-1"),
       ttlSeconds = 30,
+      quotaPolicy = TenantQuotaPolicy(maxActiveLeases = 1000, maxTtlSeconds = 30),
       appliedAt = appliedAt.plusSeconds(5)
     )
 
@@ -82,7 +85,7 @@ class RaftIntegrationSpec extends CatsEffectSuite:
       _ <- persistence.saveMetadata(PersistedMetadata(currentTerm = 3L, votedFor = Some("node-1"), commitIndex = 2L))
       loaded <- persistence.load
       replayed = loaded.entries.filter(_.index <= loaded.metadata.commitIndex).sortBy(_.index).foldLeft(ServiceState.empty) { case (state, entry) =>
-        LeaseMaterializer.applyCommand(state, entry.command, com.richrobertson.tenure.quota.TenantQuotaRegistry.default)
+        LeaseMaterializer.applyCommand(state, entry.command)
       }
       leaseView = replayed.leaseState.viewAt(resourceKey, appliedAt.plusSeconds(10))
     yield
