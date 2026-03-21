@@ -21,7 +21,7 @@
 
 ## Milestone 2: embedded Raft integration and replicated lease log *(complete)*
 
-Milestone 2 is complete in the current prototype. The repo includes one shared Raft group, replicated mutating lease commands, leader election and `NOT_LEADER` handling, static-config bootstrap, local disk persistence for Raft metadata/log entries, restart replay paths, direct TCP peer RPCs without multiplexing, and automated Scala test coverage for the clustered milestone scope.
+Milestone 2 is complete. The repo includes one shared Raft group, replicated mutating lease commands, leader election and `NOT_LEADER` handling, static-config bootstrap, local disk persistence for Raft metadata/log entries, restart replay paths, direct TCP peer RPCs without multiplexing, and automated Scala test coverage for the clustered milestone.
 
 - **Objective:** Introduce embedded Raft and replicate mutating lease commands through one shared group.
 - **Deliverables:** Single-group Raft integration, command replication path, explicit follower `NOT_LEADER` behavior for reads and writes, local durable metadata/log persistence, and static-config bootstrap over direct TCP peer endpoints.

@@ -52,7 +52,7 @@ Inter-node Raft communication uses statically configured TCP peer endpoints in v
 
 Architecture and planning work from Milestone 0 are complete, and Milestone 1 is now complete with a runnable single-node prototype. The repository now combines the documentation-first design scaffold with a local Scala 3 service that exposes acquire, renew, release, and get over HTTP, backed by an in-memory lease state machine and deterministic clock-driven tests.
 
-Milestone 2 is complete as a clustered prototype milestone. The repo now contains a single-group Raft integration path with static-config bootstrap, replicated mutating commands, follower `NOT_LEADER` behavior, local metadata/log persistence, and a passing automated Scala test suite for the current scope.
+Milestone 2 is complete. The repo now contains a single-group Raft integration path with static-config bootstrap, replicated mutating commands, follower `NOT_LEADER` behavior, local metadata/log persistence, and a passing automated Scala test suite for the clustered prototype.
 
 ## Project documents
 
