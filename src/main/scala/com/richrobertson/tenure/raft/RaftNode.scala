@@ -266,6 +266,7 @@ private final class LiveRaftNode[F[_]: Async](
   private val electionMax = 650.millis
   private val heartbeatInterval = 150.millis
   private val quorumLeaseTimeout = 900.millis
+  private val peerIoTimeoutMillis = 1000
 
   def start: F[Unit] =
     for
@@ -477,6 +478,7 @@ private final class LiveRaftNode[F[_]: Async](
   private def handleSocket(socket: Socket): F[Unit] =
     Async[F].bracket(
       Async[F].blocking {
+        socket.setSoTimeout(peerIoTimeoutMillis)
         val reader = new BufferedReader(new InputStreamReader(socket.getInputStream, StandardCharsets.UTF_8))
         val writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream, StandardCharsets.UTF_8))
         (reader, writer)
@@ -538,7 +540,10 @@ private final class LiveRaftNode[F[_]: Async](
 
   private def send(peer: PeerNode, message: PeerMessage): F[PeerMessage] =
     Async[F].bracket(Async[F].blocking(new Socket()))(socket =>
-      Async[F].blocking(socket.connect(new InetSocketAddress(peer.host, peer.port), 1000)).flatMap { _ =>
+      Async[F].blocking {
+        socket.connect(new InetSocketAddress(peer.host, peer.port), peerIoTimeoutMillis)
+        socket.setSoTimeout(peerIoTimeoutMillis)
+      }.flatMap { _ =>
         Async[F].blocking {
           val writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream, StandardCharsets.UTF_8))
           writer.write(message.asJson.noSpaces)

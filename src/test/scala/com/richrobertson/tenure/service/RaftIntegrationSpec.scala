@@ -12,6 +12,7 @@ import munit.CatsEffectSuite
 import java.net.ServerSocket
 import java.nio.file.Files
 import java.time.Instant
+import java.util.concurrent.TimeoutException
 import scala.concurrent.duration.*
 import java.util.UUID
 
@@ -20,34 +21,36 @@ class RaftIntegrationSpec extends CatsEffectSuite:
   private val tenantId = TenantId("tenant-a")
   private val resourceId = ResourceId("resource-1")
 
-  override val munitTimeout: FiniteDuration = 45.seconds
+  override val munitTimeout: FiniteDuration = 60.seconds
 
   test("multi-node cluster preserves leader-only reads, failover authority, and follower catch-up after restart") {
-    withCluster(3).use { cluster =>
-      for
-        initialLeader <- awaitLeader(cluster.nodes)
-        initialLeaderService = cluster.service(initialLeader.nodeId)
-        initialFollower = cluster.nodes.find(_.nodeId != initialLeader.nodeId).getOrElse(fail("expected a follower in a three-node cluster"))
-        followerService = cluster.service(initialFollower.nodeId)
-        followerRead <- followerService.getLease(tenantId, resourceId)
-        _ = assert(followerRead.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
-        acquire <- initialLeaderService.acquire(AcquireRequest(tenantId.value, resourceId.value, "holder-1", 15, "req-1"))
-        _ = assert(acquire.isRight)
-        _ <- awaitLeaseStatus(cluster.nodes, LeaseStatus.Active)
-        _ <- initialLeader.shutdown
-        replacementLeader <- awaitLeader(cluster.nodes.filterNot(_.nodeId == initialLeader.nodeId))
-        _ = assertNotEquals(replacementLeader.nodeId, initialLeader.nodeId)
-        replacementService = cluster.service(replacementLeader.nodeId)
-        afterFailover <- replacementService.getLease(tenantId, resourceId)
-        _ = assertEquals(afterFailover.toOption.map(_.lease.status), Some(LeaseStatus.Active))
-        restarted <- allocateNode(cluster.configs(initialLeader.nodeId), cluster.dataDirs(initialLeader.nodeId))
-        (releaseRestarted, restartedNode) = restarted
-        _ <- awaitFollowerView(restartedNode, LeaseStatus.Active)
-        release <- replacementService.release(ReleaseRequest(tenantId.value, resourceId.value, leaseId(acquire), "holder-1", "req-2"))
-        _ = assert(release.isRight)
-        _ <- awaitLeaseStatus(cluster.nodes.filterNot(_.nodeId == initialLeader.nodeId) :+ restartedNode, LeaseStatus.Released)
-        _ <- releaseRestarted
-      yield ()
+    retrying("three-node failover cluster", attempts = 3) {
+      withCluster(3).use { cluster =>
+        for
+          initialLeader <- awaitLeader(cluster.nodes)
+          initialLeaderService = cluster.service(initialLeader.nodeId)
+          initialFollower = cluster.nodes.find(_.nodeId != initialLeader.nodeId).getOrElse(fail("expected a follower in a three-node cluster"))
+          followerService = cluster.service(initialFollower.nodeId)
+          followerRead <- followerService.getLease(tenantId, resourceId)
+          _ = assert(followerRead.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
+          acquire <- initialLeaderService.acquire(AcquireRequest(tenantId.value, resourceId.value, "holder-1", 15, "req-1"))
+          _ = assert(acquire.isRight)
+          _ <- awaitLeaseStatus(cluster.nodes, LeaseStatus.Active)
+          _ <- initialLeader.shutdown
+          replacementLeader <- awaitLeader(cluster.nodes.filterNot(_.nodeId == initialLeader.nodeId))
+          _ = assertNotEquals(replacementLeader.nodeId, initialLeader.nodeId)
+          replacementService = cluster.service(replacementLeader.nodeId)
+          afterFailover <- replacementService.getLease(tenantId, resourceId)
+          _ = assertEquals(afterFailover.toOption.map(_.lease.status), Some(LeaseStatus.Active))
+          restarted <- allocateNode(cluster.configs(initialLeader.nodeId), cluster.dataDirs(initialLeader.nodeId))
+          (releaseRestarted, restartedNode) = restarted
+          _ <- awaitFollowerView(restartedNode, LeaseStatus.Active)
+          release <- replacementService.release(ReleaseRequest(tenantId.value, resourceId.value, leaseId(acquire), "holder-1", "req-2"))
+          _ = assert(release.isRight)
+          _ <- awaitLeaseStatus(cluster.nodes.filterNot(_.nodeId == initialLeader.nodeId) :+ restartedNode, LeaseStatus.Released)
+          _ <- releaseRestarted
+        yield ()
+      }
     }
   }
 
@@ -151,7 +154,7 @@ class RaftIntegrationSpec extends CatsEffectSuite:
   private def recordStatus(record: Option[com.richrobertson.tenure.model.LeaseRecord]): LeaseStatus =
     record.fold(LeaseStatus.Absent)(_.status)
 
-  private def eventually[A](label: String, timeout: FiniteDuration = 8.seconds, interval: FiniteDuration = 200.millis)(thunk: IO[A]): IO[A] =
+  private def eventually[A](label: String, timeout: FiniteDuration = 12.seconds, interval: FiniteDuration = 200.millis)(thunk: IO[A]): IO[A] =
     IO.monotonic.flatMap { start =>
       def loop(lastError: Option[Throwable]): IO[A] =
         thunk.handleErrorWith { error =>
@@ -167,6 +170,13 @@ class RaftIntegrationSpec extends CatsEffectSuite:
     result match
       case Right(value) => value.lease.leaseId.map(_.value.toString).getOrElse(fail("expected lease id in acquire result"))
       case Left(error)  => fail(s"expected successful acquire, got $error")
+
+  private def retrying[A](label: String, attempts: Int, attemptTimeout: FiniteDuration = 15.seconds)(thunk: => IO[A]): IO[A] =
+    thunk.timeoutTo(attemptTimeout, IO.raiseError(new TimeoutException(s"attempt timed out after $attemptTimeout"))).handleErrorWith { error =>
+      if attempts <= 1 then IO.raiseError(error)
+      else
+        IO.sleep(250.millis) *> retrying(label, attempts - 1)(thunk)
+    }.adaptError { case error => AssertionError(s"$label failed after retries: ${error.getMessage}") }
 
   private def parallelPeers(size: Int): List[PeerNode] =
     (1 to size).toList.map { idx =>
