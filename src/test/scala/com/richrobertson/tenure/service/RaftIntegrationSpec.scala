@@ -100,7 +100,7 @@ class RaftIntegrationSpec extends CatsEffectSuite:
   private def withCluster(size: Int): Resource[IO, RunningCluster] =
     for
       root <- Resource.eval(IO.blocking(Files.createTempDirectory("tenure-raft-cluster-spec")))
-      peers <- Resource.eval(IO(parallelPeers(size)))
+      peers <- Resource.eval(IO.blocking(parallelPeers(size)))
       dataDirs = peers.map(peer => peer.nodeId -> root.resolve(peer.nodeId).toString).toMap
       configs = peers.map(peer => peer.nodeId -> ClusterConfig(peer.nodeId, peer.apiHost, peer.apiPort, peers, dataDirs(peer.nodeId))).toMap
       nodes <- peers.traverse(peer => nodeResource(configs(peer.nodeId), dataDirs(peer.nodeId)))
