@@ -1,11 +1,13 @@
 # Milestone 1 local prototype demo
 
-The repository now includes a runnable single-node Scala 3 prototype for the Milestone 1 lease lifecycle.
+Milestone 1 is complete. The repository now includes a runnable single-node Scala 3 prototype for the core lease lifecycle.
 
-## What it demonstrates
+## What Milestone 1 delivered
 
+- runnable single-node HTTP service
 - in-memory lease state machine
 - deterministic expiration through an injected clock in tests
+- request validation for the local API
 - tenant-scoped resource identity using `(tenant_id, resource_id)`
 - minimal local HTTP API for acquire, renew, release, and get
 
@@ -30,3 +32,9 @@ curl http://localhost:8080/v1/leases/acme/scheduler-primary
 ```
 
 Because this milestone is intentionally single-node, there is no leader routing, persistence, Raft replication, or fencing token issuance yet.
+
+## Milestone boundary
+
+Milestone 1 intentionally stops at a single-node, in-memory, non-replicated prototype. It does not add clustering, embedded Raft, durable persistence, snapshots, or a production deployment model.
+
+Milestone 2 is next. It adds embedded Raft integration, replicated command flow, leader handling and redirection, and durable replicated log semantics without broadening the architecture.

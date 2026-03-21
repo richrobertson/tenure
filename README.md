@@ -50,7 +50,9 @@ Inter-node Raft communication uses statically configured TCP peer endpoints in v
 
 ## Status
 
-This repository now includes a runnable Milestone 1 single-node prototype alongside the documentation-first design scaffold. The current contents define the v1 architecture, API contract, roadmap, and key architectural decisions, plus a local Scala 3 implementation of acquire, renew, release, and get backed by an in-memory lease state machine.
+Architecture and planning work from Milestone 0 are complete, and Milestone 1 is now complete with a runnable single-node prototype. The repository now combines the documentation-first design scaffold with a local Scala 3 service that exposes acquire, renew, release, and get over HTTP, backed by an in-memory lease state machine and deterministic clock-driven tests.
+
+The current prototype is intentionally single-node, in-memory, non-replicated, and non-durable. Cluster formation, embedded Raft replication, replicated log semantics, and durable persistence remain for Milestone 2 and later milestones.
 
 ## Project documents
 
@@ -75,11 +77,13 @@ Tenure is intentionally scoped at the point where distributed-systems correctnes
 
 ## Future work
 
-Future milestones add a local prototype, embedded Raft integration, persistent recovery, observability, failure injection, and a sharding-ready routing layer while preserving the core client contract established in the docs.
+Milestone 2 is the next planned milestone. It adds embedded Raft integration, replicated command flow for mutating operations, leader handling and redirection, and durable replicated log semantics while preserving the current API contract. Later milestones add persistent recovery, observability, failure injection, and a sharding-ready routing layer.
 
 ## Local prototype
 
-Milestone 1 now ships a minimal single-node HTTP service built with Scala 3, Cats Effect, and http4s. It keeps lease transition logic pure and deterministic, with effectful clock access and in-memory state isolated at the service edge.
+Milestone 1 delivered a minimal single-node HTTP service built with Scala 3, Cats Effect, and http4s. It provides a local API surface, an in-memory lease state machine, deterministic time abstraction for tests, request validation, and tenant-scoped resource identity using `(tenant_id, resource_id)`.
+
+This prototype intentionally does not implement clustering, Raft replication, snapshots, or durable persistence yet; those boundaries define the Milestone 1 to Milestone 2 handoff.
 
 ### Build and test
 

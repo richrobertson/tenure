@@ -1,6 +1,6 @@
 # Milestones
 
-## Milestone 0: repo bootstrap and architecture docs
+## Milestone 0: repo bootstrap and architecture docs *(complete)*
 
 - **Objective:** Establish a documentation-first repository scaffold and capture the v1 design.
 - **Deliverables:** README, architecture spec, API contract, ADR, diagrams, terminology, roadmap, and implementation plan.
@@ -9,16 +9,19 @@
 - **Demo/test expectation:** A reviewer can walk the docs end to end and answer core questions about lease lifecycle, read consistency, expiration authority, retry behavior, bootstrap-safe runtime assumptions, and the v1 TCP transport choice.
 - **Done means:** The v1 contract is reviewable without requiring source code or implied behavior, including its P0 operating model and explicit non-dependencies.
 
-## Milestone 1: local single-node prototype *(in progress: runnable prototype now in repo)*
+## Milestone 1: local single-node prototype *(complete)*
 
 - **Objective:** Build a minimal local prototype of lease semantics without distributed replication.
 - **Deliverables:** In-memory lease state machine, local API surface, deterministic time abstraction, and basic request validation.
+- **Completion note:** Complete. The repo now includes a runnable single-node service with a local API surface, in-memory lease state machine, deterministic fake-clock testing, request validation, and tenant-scoped resource identity.
 - **Out of scope:** Raft replication, snapshots, and network hardening.
 - **Validation artifact:** Deterministic state-machine test suite output plus an API behavior matrix for acquire, renew, release, get, and list.
 - **Demo/test expectation:** Scripted demo showing one tenant, multiple resources, fake-clock expiry and renewal boundary tests, rejection of invalid TTLs, tenant-scoped behavior, and local startup of the single-node HTTP prototype without any clustering or DNS assumption.
 - **Done means:** A single-node service enforces the documented lease contract with deterministic tests, fake-clock time control, no hidden time dependencies, and a runtime model that does not assume Kubernetes or external discovery.
 
-## Milestone 2: embedded Raft integration and replicated lease log
+## Milestone 2: embedded Raft integration and replicated lease log *(next)*
+
+Milestone 2 is the next active milestone. It adds embedded Raft integration, replicated command flow for mutating lease operations, leader handling and redirection, and durable replicated log semantics while keeping the current architecture and API contract intact.
 
 - **Objective:** Introduce embedded Raft and replicate mutating lease commands through one shared group.
 - **Deliverables:** Single-group Raft integration, command replication path, leader forwarding/redirection behavior, and local durable log persistence.
