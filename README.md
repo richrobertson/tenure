@@ -54,6 +54,8 @@ Architecture and planning work from Milestone 0 are complete, and Milestone 1 is
 
 Milestone 2 is complete. The repo now contains a single-group Raft integration path with static-config bootstrap, replicated mutating commands, follower `NOT_LEADER` behavior, local metadata/log persistence, and a passing automated Scala test suite for the clustered prototype.
 
+Milestone 3 is also complete. The replicated lease lifecycle now has deterministic `Acquire`, `Renew`, `Release`, and leader-only `GetLease` semantics backed by an authoritative materialized lease map reconstructed from committed Raft commands, plus duplicate-request replay and leadership-change coverage in the automated tests.
+
 ## Project documents
 
 - [Docs index](docs/index.md)
@@ -67,6 +69,7 @@ Milestone 2 is complete. The repo now contains a single-group Raft integration p
 - [Terminology](docs/terminology.md)
 - [Milestone 1 local demo](docs/demo/milestone-1.md)
 - [Milestone 2 clustered demo](docs/demo/milestone-2.md)
+- [Milestone 3 lifecycle demo](docs/demo/milestone-3.md)
 
 ## Why leases are different from simple distributed locks
 
@@ -78,13 +81,13 @@ Tenure is intentionally scoped at the point where distributed-systems correctnes
 
 ## Future work
 
-Milestone 2 is now complete. Later milestones still need stronger recovery tooling, observability, and a sharding-ready routing layer.
+Milestone 3 is now complete. Later milestones still need stronger recovery tooling, observability, quota policy, and a sharding-ready routing layer.
 
 ## Local prototype
 
 Milestone 1 delivered a minimal single-node HTTP service built with Scala 3, Cats Effect, and http4s. It provides a local API surface, an in-memory lease state machine, deterministic time abstraction for tests, request validation, and tenant-scoped resource identity using `(tenant_id, resource_id)`.
 
-The Milestone 2 prototype intentionally stays narrow: one shared Raft group, TCP peer RPCs without multiplexing, durable metadata/log persistence, and leader-only reads in v1. It still does not implement multi-group sharding, membership changes, or full snapshot/compaction.
+The Milestone 3 prototype intentionally stays narrow: one shared Raft group, TCP peer RPCs without multiplexing, durable metadata/log persistence, deterministic replicated lease lifecycle semantics, and leader-only reads in v1. It still does not implement multi-group sharding, membership changes, quota policy, or full snapshot/compaction.
 
 ### Build and test
 
