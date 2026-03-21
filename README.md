@@ -52,7 +52,7 @@ Inter-node Raft communication uses statically configured TCP peer endpoints in v
 
 Architecture and planning work from Milestone 0 are complete, and Milestone 1 is now complete with a runnable single-node prototype. The repository now combines the documentation-first design scaffold with a local Scala 3 service that exposes acquire, renew, release, and get over HTTP, backed by an in-memory lease state machine and deterministic clock-driven tests.
 
-Milestone 2 is in progress as a clustered prototype. The repo now contains a single-group Raft integration path with static-config bootstrap, replicated mutating commands, follower `NOT_LEADER` behavior, and local metadata/log persistence, but the milestone should be considered unverified here until the Scala test suite is run successfully in a working build environment.
+Milestone 2 is in progress as a clustered prototype. The repo now contains a single-group Raft integration path with static-config bootstrap, replicated mutating commands, follower `NOT_LEADER` behavior, and local metadata/log persistence, but the latest branch tip should still be treated as unverified because the full Scala test suite does not yet pass reliably in this environment.
 
 ## Project documents
 
@@ -78,7 +78,7 @@ Tenure is intentionally scoped at the point where distributed-systems correctnes
 
 ## Future work
 
-Milestone 2 is still the current active milestone. This repo revision narrows in on the clustered prototype path, but milestone completion should only be claimed after the automated Scala tests are run successfully in a working build environment. Later milestones still need stronger recovery tooling, observability, and a sharding-ready routing layer.
+Milestone 2 is still the current active milestone. This repo revision narrows in on the clustered prototype path, but milestone completion should only be claimed after the automated Scala tests pass reliably. The latest `sbt test` run in this environment still fails in `RaftIntegrationSpec`, so the milestone remains in progress. Later milestones still need stronger recovery tooling, observability, and a sharding-ready routing layer.
 
 ## Local prototype
 
