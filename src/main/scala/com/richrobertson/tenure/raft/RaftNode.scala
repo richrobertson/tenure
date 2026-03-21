@@ -540,7 +540,7 @@ private final class LiveRaftNode[F[_]: Async](
   private def nowMillis: F[Long] = Temporal[F].realTime.map(_.toMillis)
 
   private def setRoleGauge(role: NodeRole): F[Unit] =
-    observability.setGauge("node_role", if role == NodeRole.Leader then 1L else 0L, Map("node_id" -> nodeId, "role" -> role.toString.toLowerCase))
+    observability.setGauge("node_role", if role == NodeRole.Leader then 1L else 0L, Map("node_id" -> nodeId))
 
   private def logNotLeader(kind: String, tenantId: Option[String], resourceId: Option[String], requestId: Option[String]): F[Unit] =
     nowMillis.flatMap(ts => observability.incrementCounter("not_leader_responses_total", Map("node_id" -> nodeId, "operation_kind" -> kind)) *> observability.log(LogEvent(ts, "WARN", "request.not_leader", s"rejected $kind request because node is not leader", nodeId = Some(nodeId), leaderId = None, tenantId = tenantId, resourceId = resourceId, requestId = requestId, errorCode = Some("NOT_LEADER"))))

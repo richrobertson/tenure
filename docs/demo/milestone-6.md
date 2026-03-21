@@ -6,7 +6,7 @@ This runbook documents the narrow Milestone 6 surface for the v1 single-group re
 
 - local in-process metrics for leadership transitions, leader changes, mutating outcomes, `NOT_LEADER` responses, duplicate retries, quota/auth denials, recovery, snapshots, commit latency, and failure-injection delays
 - structured log events with stable `event_type` names and correlation fields such as `node_id`, `tenant_id`, `resource_id`, `request_id`, `term`, and `leader_id`
-- a local debug endpoint at `GET /debug/observability`
+- a local debug endpoint at `GET /debug/observability` that is only mounted when `apiHost` is loopback (`127.0.0.1`, `localhost`, or `::1`)
 - deterministic failure-injection coverage for leader loss, disk delays on the persistence path, and request retries / retry storms
 
 ## Expected signals
@@ -23,7 +23,7 @@ Trigger:
 Expected metrics/logs:
 - `leader_changes_total{node_id=...}` increments.
 - `leadership_transitions_total{role=leader|follower}` increments.
-- `not_leader_responses_total{operation_kind=get|write}` increments during the handoff window.
+- `not_leader_responses_total{operation_kind=get|write}` increments during the handoff window, with `operation` preserved separately for per-endpoint breakdown.
 - structured logs include `event_type=role.transition`, `event_type=election.started`, and `event_type=lease.request.result` with `error_code=NOT_LEADER`.
 
 ### Disk delay
@@ -76,7 +76,7 @@ When running the daemon locally, inspect the current in-process snapshot with:
 curl -s http://127.0.0.1:<api-port>/debug/observability
 ```
 
-The endpoint returns counters, gauges, recorded timings, and the structured event log buffer so a reviewer can correlate the scenario with the expected signals.
+The endpoint returns counters, gauges, recorded timings, and a bounded structured event log buffer so a reviewer can correlate the scenario with the expected signals without unbounded in-memory growth. Timing samples are also capped per metric key.
 
 ## Still out of scope
 

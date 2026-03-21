@@ -39,8 +39,8 @@ class ObservabilityFailureInjectionSpec extends CatsEffectSuite:
         _ <- cluster.service(replacement.nodeId).renew(RenewRequest(principal, tenantId.value, "resource-1", leaseId(acquired), "holder-1", 12, "req-2")).map(result => assert(result.isRight))
         snapshot <- cluster.observability.snapshot
       yield
-        assert(snapshot.counters.exists { case (key, value) => key.name == "leader_changes_total" && value >= 1L })
-        assert(snapshot.counters.exists { case (key, value) => key.name == "not_leader_responses_total" && value >= 1L })
+        assert(snapshot.counters.exists(sample => sample.metric.name == "leader_changes_total" && sample.value >= 1L))
+        assert(snapshot.counters.exists(sample => sample.metric.name == "not_leader_responses_total" && sample.value >= 1L))
         assert(snapshot.events.exists(_.eventType == "role.transition"))
         assert(snapshot.events.exists(event => event.eventType == "lease.request.result" && event.errorCode.contains("NOT_LEADER")))
     }
@@ -64,10 +64,10 @@ class ObservabilityFailureInjectionSpec extends CatsEffectSuite:
           assert(first == retry)
           assert(quotaDenied.left.exists(_.isInstanceOf[ServiceError.QuotaExceeded]))
           assert(authDenied.left.exists(_.isInstanceOf[ServiceError.Forbidden]))
-          assert(snapshot.counters.exists { case (key, value) => key.name == "duplicate_requests_total" && value >= 1L })
-          assert(snapshot.counters.exists { case (key, value) => key.name == "quota_rejections_total" && value >= 1L })
-          assert(snapshot.counters.exists { case (key, value) => key.name == "auth_denials_total" && value >= 1L })
-          assert(snapshot.counters.exists { case (key, value) => key.name == "stale_writer_rejections_total" && value >= 1L })
+          assert(snapshot.counters.exists(sample => sample.metric.name == "duplicate_requests_total" && sample.value >= 1L))
+          assert(snapshot.counters.exists(sample => sample.metric.name == "quota_rejections_total" && sample.value >= 1L))
+          assert(snapshot.counters.exists(sample => sample.metric.name == "auth_denials_total" && sample.value >= 1L))
+          assert(snapshot.counters.exists(sample => sample.metric.name == "stale_writer_rejections_total" && sample.value >= 1L))
           assert(snapshot.events.exists(_.eventType == "stale_writer.rejected"))
       }
     }
@@ -90,8 +90,8 @@ class ObservabilityFailureInjectionSpec extends CatsEffectSuite:
             _ <- service.acquire(AcquireRequest(principal, tenantId.value, "resource-5", "holder-5", 15, "req-5")).map(result => assert(result.isRight))
             _ <- service.acquire(AcquireRequest(principal, tenantId.value, "resource-6", "holder-6", 15, "req-6")).map(result => assert(result.isRight))
             beforeRestart <- observability.snapshot
-            _ = assert(beforeRestart.counters.exists { case (key, value) => key.name == "failure_injection_total" && value >= 1L })
-            _ = assert(beforeRestart.timingsMillis.exists { case (key, values) => key.name == "commit_latency_ms" && values.exists(_ >= 150L) })
+            _ = assert(beforeRestart.counters.exists(sample => sample.metric.name == "failure_injection_total" && sample.value >= 1L))
+            _ = assert(beforeRestart.timingsMillis.exists(sample => sample.metric.name == "commit_latency_ms" && sample.value.exists(_ >= 150L)))
             _ = assert(beforeRestart.events.exists(_.eventType == "failure_injection.delay"))
             _ = assert(beforeRestart.events.exists(_.eventType == "snapshot.saved"))
             _ <- leader.shutdown
@@ -101,7 +101,7 @@ class ObservabilityFailureInjectionSpec extends CatsEffectSuite:
             afterRestart <- observability.snapshot
             _ <- releaseRestarted
           yield
-            assert(afterRestart.counters.exists { case (key, value) => key.name == "recovery_events_total" && value >= 2L })
+            assert(afterRestart.counters.exists(sample => sample.metric.name == "recovery_events_total" && sample.value >= 2L))
             assert(afterRestart.events.exists(_.eventType == "recovery.completed"))
         }
       }

@@ -10,6 +10,7 @@ import com.richrobertson.tenure.service.LeaseService
 import com.richrobertson.tenure.service.ServiceCodecs.given
 import com.richrobertson.tenure.time.Clock
 import io.circe.parser.decode
+import org.http4s.HttpApp
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.implicits.*
 import java.nio.charset.StandardCharsets
@@ -37,9 +38,18 @@ object Main extends IOApp:
         .default[IO]
         .withHost(com.comcast.ip4s.Host.fromString(config.apiHost).getOrElse(com.comcast.ip4s.Host.fromString("127.0.0.1").get))
         .withPort(com.comcast.ip4s.Port.fromInt(config.apiPort).get)
-        .withHttpApp((LeaseRoutes.routes[IO](service) <+> ObservabilityRoutes.routes[IO](observability.snapshot)).orNotFound)
+        .withHttpApp(httpApp(config, service, observability.snapshot))
         .build
     yield ()
+
+  private def httpApp(config: ClusterConfig, service: LeaseService[IO], snapshot: IO[com.richrobertson.tenure.observability.ObservabilitySnapshot]): HttpApp[IO] =
+    val baseRoutes = LeaseRoutes.routes[IO](service)
+    val debugRoutes = if isLoopback(config.apiHost) then ObservabilityRoutes.routes[IO](snapshot) else org.http4s.HttpRoutes.empty[IO]
+    (baseRoutes <+> debugRoutes).orNotFound
+
+  private def isLoopback(host: String): Boolean =
+    val normalized = host.trim.toLowerCase
+    normalized == "127.0.0.1" || normalized == "localhost" || normalized == "::1"
 
   private def loadConfig(path: String): IO[ClusterConfig] =
     IO.blocking(Files.readString(Paths.get(path), StandardCharsets.UTF_8)).flatMap(raw => IO.fromEither(decode[ClusterConfig](raw)))

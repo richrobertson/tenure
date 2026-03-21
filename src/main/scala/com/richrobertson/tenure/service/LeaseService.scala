@@ -301,6 +301,11 @@ object ServiceObservability:
       case _: ServiceError.QuotaExceeded => "QUOTA_EXCEEDED"
       case _: ServiceError.NotLeader => "NOT_LEADER"
 
+  private def operationKind(operation: String): String =
+    operation match
+      case "get" | "list" => "get"
+      case _ => "write"
+
   def recordResult[F[_]: Async](observability: Observability[F], clock: Clock[F], nodeId: String, operation: String, requestContext: Option[RequestContext], result: Either[ServiceError, Unit], dedupe: Boolean = false): F[Unit] =
     clock.now.flatMap { now =>
       val labels = Map("node_id" -> nodeId, "operation" -> operation, "result" -> result.fold(_ => "error", _ => "success"))
@@ -312,7 +317,7 @@ object ServiceObservability:
         case Left(error) =>
           val code = errorCode(error)
           val extra = error match
-            case _: ServiceError.NotLeader => observability.incrementCounter("not_leader_responses_total", Map("node_id" -> nodeId, "operation_kind" -> operation))
+            case _: ServiceError.NotLeader => observability.incrementCounter("not_leader_responses_total", Map("node_id" -> nodeId, "operation_kind" -> operationKind(operation), "operation" -> operation))
             case _: ServiceError.QuotaExceeded => observability.incrementCounter("quota_rejections_total", Map("node_id" -> nodeId, "operation" -> operation))
             case _: ServiceError.Forbidden | _: ServiceError.Unauthorized => observability.incrementCounter("auth_denials_total", Map("node_id" -> nodeId, "operation" -> operation))
             case _ => Async[F].unit

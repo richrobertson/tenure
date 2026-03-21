@@ -1,7 +1,6 @@
 package com.richrobertson.tenure.persistence
 
 import cats.effect.Sync
-import cats.effect.kernel.Temporal
 import cats.syntax.all.*
 import com.richrobertson.tenure.observability.Observability
 import com.richrobertson.tenure.raft.{PersistedMetadata, PersistedNodeState, PersistedSnapshot, RaftLogEntry}
@@ -22,7 +21,7 @@ trait RaftPersistence[F[_]]:
   def saveSnapshot(snapshot: PersistedSnapshot): F[Unit]
 
 object RaftPersistence:
-  def fileBacked[F[_]: Temporal](
+  def fileBacked[F[_]: Sync](
       dataDir: String,
       nodeId: String = "local",
       failureInjector: FailureInjector[F] = FailureInjector.noop[F],
@@ -34,7 +33,7 @@ object RaftPersistence:
       new FileBackedRaftPersistence[F](root, nodeId, failureInjector, observability)
     }
 
-private final class FileBackedRaftPersistence[F[_]: Temporal](root: Path, nodeId: String, failureInjector: FailureInjector[F], observability: Observability[F])(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]) extends RaftPersistence[F]:
+private final class FileBackedRaftPersistence[F[_]: Sync](root: Path, nodeId: String, failureInjector: FailureInjector[F], observability: Observability[F])(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]) extends RaftPersistence[F]:
   private val metadataPath = root.resolve("metadata.json")
   private val logPath = root.resolve("log.jsonl")
   private val snapshotPath = root.resolve("snapshot.json")
