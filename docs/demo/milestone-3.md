@@ -22,6 +22,7 @@ Milestone 3 completes the replicated lease lifecycle on top of the shared Raft l
 | Release succeeds for the correct holder | `LeaseStateMachineSpec`, `LeaseServiceSpec` |
 | Release with wrong holder fails | `LeaseStateMachineSpec`, `LeaseServiceSpec` |
 | `GetLease` returns committed authoritative state | `LeaseServiceSpec`, `RaftIntegrationSpec` |
+| Multi-node failover and restart preserve leader-only authority and follower catch-up | `RaftIntegrationSpec` |
 | Follower read or write returns `NOT_LEADER` | `LeaseServiceSpec` |
 | Duplicate `request_id` replays deterministically after leader change | `LeaseServiceSpec` |
 | Restart or replay reconstructs the same materialized lease view | `RaftIntegrationSpec` |
@@ -43,5 +44,6 @@ sbt "testOnly com.richrobertson.tenure.statemachine.LeaseStateMachineSpec com.ri
 ## Notes
 
 - The authoritative lease map remains keyed by `(tenant_id, resource_id)`.
+- `RaftIntegrationSpec` now restores a real three-node cluster check for leader-only follower rejection, failover to a new leader, and restart catch-up of the old leader from persisted Raft state.
 - v1 still uses one shared Raft group and leader-only reads.
 - Advanced list filtering, quota enforcement, and broader admin/query surfaces remain out of scope until later milestones.
