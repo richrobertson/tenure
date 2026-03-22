@@ -62,7 +62,7 @@ Each node is expected to have a writable local data directory for Raft metadata,
 
 At a high level, the local persistence contract is:
 
-- `metadata.json` tracks Raft term/vote/commit progress
+- `metadata.json` tracks Raft term/vote/commit/apply (`lastApplied`) progress
 - `log.jsonl` stores ordered replicated entries
 - `snapshot.json` stores the latest local recovery snapshot of materialized service state
 - `node-id` binds that directory to one configured node ID so operators do not accidentally reuse persisted state under a different identity
