@@ -149,6 +149,21 @@ class StartupValidationSpec extends CatsEffectSuite:
     assert(result.left.exists(_.getMessage.contains("must be an explicit IP or localhost")))
   }
 
+  test("cluster config rejects expanded IPv6 wildcard peer hosts") {
+    val config = ClusterConfig(
+      nodeId = "node-1",
+      apiHost = "127.0.0.1",
+      apiPort = 9101,
+      peers = List(
+        PeerNode("node-1", "0:0:0:0:0:0:0:0", 9001, "127.0.0.1", 9101)
+      ),
+      dataDir = "/tmp/tenure-startup-validation-ipv6-wildcard"
+    )
+
+    val result = StartupValidation.validateConfig(config)
+    assert(result.left.exists(_.getMessage.contains("must be an explicit IP or localhost")))
+  }
+
   test("cluster config rejects duplicate endpoints after host normalization") {
     val config = ClusterConfig(
       nodeId = "node-1",

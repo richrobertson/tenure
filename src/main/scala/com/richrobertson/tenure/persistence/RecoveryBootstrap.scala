@@ -1,3 +1,9 @@
+/**
+ * Restart recovery from persisted Raft state.
+ *
+ * Recovery reconstructs materialized lease state from the latest snapshot plus replay of committed log
+ * entries. It does not consult any external system.
+ */
 package com.richrobertson.tenure.persistence
 
 import cats.effect.Sync
@@ -6,6 +12,7 @@ import com.richrobertson.tenure.observability.{LogEvent, Observability}
 import com.richrobertson.tenure.raft.{PersistedNodeState, PersistedSnapshot}
 import com.richrobertson.tenure.service.{LeaseMaterializer, ServiceState}
 
+/** Result of replaying persisted state during startup. */
 final case class RecoveredState(
     persisted: PersistedNodeState,
     materialized: ServiceState,
@@ -13,10 +20,18 @@ final case class RecoveredState(
     lastApplied: Long
 )
 
+/** Recovery entry points used by the Raft runtime during startup. */
 object RecoveryBootstrap:
+  /** Recovers persisted state with default node identity and no-op observability. */
   def recover[F[_]: Sync](persistence: RaftPersistence[F]): F[RecoveredState] =
     recover(persistence, "local", Observability.noop[F], Sync[F].pure(0L))
 
+  /**
+   * Recovers materialized state from persistence.
+   *
+   * The recovered `commitIndex` is the maximum of the snapshot index and persisted metadata commit index,
+   * and `lastApplied` is set to that same value after replay.
+   */
   def recover[F[_]: Sync](persistence: RaftPersistence[F], nodeId: String, observability: Observability[F], nowMillis: F[Long]): F[RecoveredState] =
     persistence.load.flatMap { persisted =>
       val validateSnapshotFormat: F[Unit] =

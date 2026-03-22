@@ -1,3 +1,9 @@
+/**
+ * HTTP route definitions and wire-format models for the lease API.
+ *
+ * This package adapts between JSON/HTTP requests and the service-layer request/result types. The goal is to
+ * keep the wire contract explicit and boring.
+ */
 package com.richrobertson.tenure.api
 
 import cats.Applicative
@@ -15,10 +21,15 @@ import org.http4s.circe.CirceEntityCodec.*
 import org.http4s.dsl.Http4sDsl
 import org.typelevel.ci.CIStringSyntax
 
+/** JSON body for `POST /v1/leases/acquire`. */
 final case class AcquireRequestBody(tenantId: String, resourceId: String, holderId: String, ttlSeconds: Long, requestId: String)
+/** JSON body for `POST /v1/leases/renew`. */
 final case class RenewRequestBody(tenantId: String, resourceId: String, leaseId: String, holderId: String, ttlSeconds: Long, requestId: String)
+/** JSON body for `POST /v1/leases/release`. */
 final case class ReleaseRequestBody(tenantId: String, resourceId: String, leaseId: String, holderId: String, requestId: String)
+/** Common JSON error response shape. */
 final case class ErrorResponse(code: String, message: String, leaderHint: Option[String] = None)
+/** JSON projection of a lease returned by read endpoints. */
 final case class LeaseResponse(
     tenantId: String,
     resourceId: String,
@@ -29,12 +40,18 @@ final case class LeaseResponse(
     fencingToken: Long,
     version: Long
 )
+/** JSON response for acquire. */
 final case class AcquireResponse(leaseId: String, expiryTime: String, fencingToken: Long, created: Boolean)
+/** JSON response for renew. */
 final case class RenewResponse(leaseId: String, expiryTime: String, fencingToken: Long, renewed: Boolean)
+/** JSON response for release. */
 final case class ReleaseResponse(leaseId: String, expiryTime: String, fencingToken: Long, released: Boolean)
+/** JSON response for a single-resource read. */
 final case class GetLeaseResponse(found: Boolean, lease: LeaseResponse)
+/** JSON response for a tenant-scoped list read. */
 final case class ListLeasesResponse(leases: List[LeaseResponse])
 
+/** HTTP routes and wire codecs for the lease API. */
 object LeaseRoutes:
   private val principalIdHeader = ci"X-Tenure-Principal-Id"
   private val principalTenantHeader = ci"X-Tenure-Principal-Tenant"
@@ -107,6 +124,7 @@ object LeaseRoutes:
   given Encoder[LeaseStatus] = Encoder.encodeString.contramap(_.toString.toUpperCase)
   given Decoder[LeaseStatus] = Decoder.decodeString.emap(_ => Left("LeaseStatus decoding is not supported for API requests"))
 
+  /** Builds the full lease-service HTTP route set. */
   def routes[F[_]: Concurrent](service: LeaseService[F]): HttpRoutes[F] =
     val dsl = new Http4sDsl[F] {}
     given Http4sDsl[F] = dsl
