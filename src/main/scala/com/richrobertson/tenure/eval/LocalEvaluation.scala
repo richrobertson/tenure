@@ -206,7 +206,7 @@ object LocalEvaluation extends IOApp:
           }
         }
     }.map { totalMillis =>
-      ThroughputMetric("acquire_unique_resources", operations, totalMillis, if totalMillis == 0 then operations.toDouble else (operations.toDouble * 1000d) / totalMillis.toDouble)
+      ThroughputMetric("acquire_unique_resources", operations, totalMillis, opsPerSecond(operations, totalMillis))
     }
 
   private def withCluster(root: Path): Resource[IO, RunningCluster] =
@@ -343,6 +343,10 @@ object LocalEvaluation extends IOApp:
       maxMs = sorted.lastOption.getOrElse(0L),
       averageMs = if samples.isEmpty then 0d else samples.sum.toDouble / samples.size.toDouble
     )
+
+  private[eval] def opsPerSecond(operations: Int, totalMillis: Long): Double =
+    val durationMillis = math.max(totalMillis, 1L)
+    (operations.toDouble * 1000d) / durationMillis.toDouble
 
   private def environmentInfo: EnvironmentInfo =
     EnvironmentInfo(

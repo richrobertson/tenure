@@ -89,3 +89,8 @@ class LocalEvaluationSpec extends CatsEffectSuite:
       }
     }
   }
+
+  test("throughput rate clamps zero-millis runs to a one-millisecond denominator") {
+    val rate = LocalEvaluation.opsPerSecond(operations = 5, totalMillis = 0L)
+    assertEqualsDouble(rate, 5000d, 0.0001d)
+  }
