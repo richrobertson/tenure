@@ -27,7 +27,7 @@ flowchart TD
     E --> F[Materialized ServiceState]
     C --> G[Persisted metadata.json]
     D --> H[Persisted log.jsonl]
-    E --> I[Occasional persisted snapshot.json (threshold-based)]
+    E --> I[Occasional threshold-based snapshot.json write]
     J[node-id marker and dataDir validation] --> G
     J --> H
     J --> I
@@ -196,8 +196,8 @@ flowchart TD
     C --> D[Load snapshot.json if present]
     D --> E[Load log.jsonl entries]
     E --> F[Choose base state from snapshot or empty ServiceState]
-    F --> G[Recover commitIndex = max(snapshot.lastIncludedIndex, persisted metadata.commitIndex)]
-    G --> H[Replay committed log entries with index in (snapshot.lastIncludedIndex, commitIndex]
+    F --> G[Recover effective commitIndex from snapshot index and persisted metadata]
+    G --> H[Replay committed log entries after snapshot index through commitIndex]
     H --> I[Set lastApplied = recovered commitIndex]
     I --> J[Node can rejoin as follower and catch up]
 ```
@@ -224,35 +224,21 @@ sequenceDiagram
 
 ## Leader failover and recovery path
 
-```text
-client request
-    |
-    v
-old leader fails
-    |
-    v
-remaining quorum elects new leader
-    |
-    v
-new leader replays durable Raft log / snapshot
-    |
-    v
-state machine becomes authoritative again
-    |
-    v
-clients retry with same request_id for idempotent handling
+```mermaid
+flowchart TD
+    A[Client request in flight] --> B[Old leader fails]
+    B --> C[Remaining quorum elects a new leader]
+    C --> D[New leader restores durable Raft state]
+    D --> E[State machine becomes authoritative again]
+    E --> F[Clients retry with the same request_id]
+    F --> G[Idempotency returns the committed result safely]
 ```
 
 ## Future routing / placement abstraction
 
-```text
-request(tenant_id, resource_id)
-           |
-           v
-placement(tenant_id, resource_id) -> raft_group_id
-           |
-     +-----+-----+
-     |           |
-    v1       future
-  group-1   group-N
+```mermaid
+flowchart TD
+    A[request tenant_id, resource_id] --> B[placement tenant_id, resource_id -> raft_group_id]
+    B --> C[v1: group-1]
+    B --> D[future: group-N]
 ```
