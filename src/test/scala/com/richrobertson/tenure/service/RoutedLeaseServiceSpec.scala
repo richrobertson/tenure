@@ -78,9 +78,8 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       firstFiber <- service.acquire(AcquireRequest(principal, tenantId.value, resourceA.value, "holder-a", 10, "req-serial")).start
       _ <- firstStarted.get
       secondFiber <- service.acquire(AcquireRequest(principal, tenantId.value, resourceB.value, "holder-b", 10, "req-serial")).start
-      _ <- IO.sleep(scala.concurrent.duration.DurationInt(200).millis)
-      secondObservedBeforeRelease <- secondEntered.tryGet
-      _ = assertEquals(secondObservedBeforeRelease, None)
+      secondObservedBeforeRelease <- assertBlocked(secondEntered)
+      _ = assertEquals(secondObservedBeforeRelease, Right(()))
       _ <- releaseFirst.complete(()).void
       first <- firstFiber.joinWithNever
       second <- secondFiber.joinWithNever
@@ -112,9 +111,8 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       firstFiber <- service.acquire(AcquireRequest(principal, tenantId.value, resourceA.value, "holder-a", 10, "req-1")).start
       _ <- firstStarted.get
       secondFiber <- service.acquire(AcquireRequest(principal, tenantId.value, resourceB.value, "holder-b", 10, "req-2")).start
-      _ <- IO.sleep(scala.concurrent.duration.DurationInt(200).millis)
-      secondObservedBeforeRelease <- secondEntered.tryGet
-      _ = assertEquals(secondObservedBeforeRelease, None)
+      secondObservedBeforeRelease <- assertBlocked(secondEntered)
+      _ = assertEquals(secondObservedBeforeRelease, Right(()))
       _ <- releaseFirst.complete(()).void
       first <- firstFiber.joinWithNever
       second <- secondFiber.joinWithNever
@@ -148,9 +146,8 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       firstFiber <- lockedService.renew(RenewRequest(principal, tenantId.value, resourceA.value, leaseIdA, "holder-a", 10, "renew-req")).start
       _ <- firstStarted.get
       secondFiber <- lockedService.renew(RenewRequest(principal, tenantId.value, resourceB.value, leaseIdB, "holder-b", 10, "renew-req")).start
-      _ <- IO.sleep(scala.concurrent.duration.DurationInt(200).millis)
-      secondObservedBeforeRelease <- secondEntered.tryGet
-      _ = assertEquals(secondObservedBeforeRelease, None)
+      secondObservedBeforeRelease <- assertBlocked(secondEntered)
+      _ = assertEquals(secondObservedBeforeRelease, Right(()))
       _ <- releaseFirst.complete(()).void
       first <- firstFiber.joinWithNever
       second <- secondFiber.joinWithNever
@@ -184,9 +181,8 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       firstFiber <- lockedService.release(ReleaseRequest(principal, tenantId.value, resourceA.value, leaseIdA, "holder-a", "release-req")).start
       _ <- firstStarted.get
       secondFiber <- lockedService.release(ReleaseRequest(principal, tenantId.value, resourceB.value, leaseIdB, "holder-b", "release-req")).start
-      _ <- IO.sleep(scala.concurrent.duration.DurationInt(200).millis)
-      secondObservedBeforeRelease <- secondEntered.tryGet
-      _ = assertEquals(secondObservedBeforeRelease, None)
+      secondObservedBeforeRelease <- assertBlocked(secondEntered)
+      _ = assertEquals(secondObservedBeforeRelease, Right(()))
       _ <- releaseFirst.complete(()).void
       first <- firstFiber.joinWithNever
       second <- secondFiber.joinWithNever
@@ -255,6 +251,9 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
 
   private def wrapAcquire(group: GroupRuntime[IO])(beforeAcquire: IO[Unit]): GroupRuntime[IO] =
     wrapGroup(group, beforeAcquire = beforeAcquire)
+
+  private def assertBlocked(signal: Deferred[IO, Unit]): IO[Either[Unit, Unit]] =
+    IO.race(signal.get, IO.sleep(scala.concurrent.duration.DurationInt(200).millis).void)
 
   private def wrapGroup(
       group: GroupRuntime[IO],
