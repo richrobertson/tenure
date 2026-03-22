@@ -79,7 +79,7 @@ sequenceDiagram
     participant F as Followers
     participant SM as Lease State Machine
 
-    C->>L: Release(tenant_id, resource_id, lease_id, request_id)
+    C->>L: Release(tenant_id, resource_id, lease_id, holder_id, request_id)
     L->>L: Validate holder, request_id, active lease
     L->>F: Replicate release command
     F-->>L: Ack
@@ -120,7 +120,7 @@ sequenceDiagram
 
     C->>L: Mutating lease request
     L->>L: Build replicated command
-    L->>P: Append local log entry and persist metadata
+    L->>P: Append local log entry (metadata persisted on commit/apply)
     L->>F1: AppendEntries(entry)
     L->>F2: AppendEntries(entry)
     F1->>F1: Persist entry locally
@@ -142,8 +142,8 @@ sequenceDiagram
     participant L as Leader
 
     C->>F: GetLease(tenant_id, resource_id)
-    F-->>C: 409 NOT_LEADER + leader_hint
-    C->>L: Retry GetLease using leader_hint
+    F-->>C: 409 NOT_LEADER + leaderHint
+    C->>L: Retry GetLease using leaderHint
     L->>L: Read authoritative leader state
     L-->>C: 200 GetLeaseResponse(found/status)
 ```
