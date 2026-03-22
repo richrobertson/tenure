@@ -74,6 +74,21 @@ class StartupValidationSpec extends CatsEffectSuite:
     assert(result.left.exists(_.getMessage.contains("must match local peer apiPort")))
   }
 
+  test("cluster config accepts case-insensitive local api host matches") {
+    val config = ClusterConfig(
+      nodeId = "node-1",
+      apiHost = "LOCALHOST",
+      apiPort = 9101,
+      peers = List(
+        PeerNode("node-1", "127.0.0.1", 9001, "localhost", 9101)
+      ),
+      dataDir = "/tmp/tenure-startup-validation-case-host"
+    )
+
+    val result = StartupValidation.validateConfig(config)
+    assert(result.isRight)
+  }
+
   test("cluster config rejects host values with embedded ports") {
     val config = ClusterConfig(
       nodeId = "node-1",

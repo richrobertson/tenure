@@ -46,7 +46,7 @@ object StartupValidation:
       localPeers = config.peers.filter(_.nodeId == config.nodeId)
       _ <- ensure(localPeers.size == 1, s"expected exactly one peer entry for local node '${config.nodeId}', found ${localPeers.size}")
       localPeer = localPeers.headOption.getOrElse(config.peers.head)
-      _ <- ensure(localPeer.apiHost == config.apiHost, s"config apiHost '${config.apiHost}' must match local peer apiHost '${localPeer.apiHost}'")
+      _ <- ensure(normalizeHost(localPeer.apiHost) == normalizeHost(config.apiHost), s"config apiHost '${config.apiHost}' must match local peer apiHost '${localPeer.apiHost}'")
       _ <- ensure(localPeer.apiPort == config.apiPort, s"config apiPort '${config.apiPort}' must match local peer apiPort '${localPeer.apiPort}'")
       _ <- ensureUnique(config.peers.map(_.nodeId), "peer node ids")
       _ <- ensureUnique(config.peers.map(peer => endpointKey(peer.host, peer.port)), "peer raft endpoints")
