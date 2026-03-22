@@ -85,11 +85,13 @@ Milestone 7 is complete. The repo now contains an explicit routing layer, a `Gro
 - **Demo/test expectation:** Demonstrate that the service resolves placement before reads and writes, can simulate multiple groups locally, keeps API behavior stable, and still relies only on local config, TCP transport, and local process state.
 - **Done means:** Routing and placement are explicit implementation seams, deterministic local multi-group execution is test-covered, per-group recovery works, and the v1 transport path remains simple TCP without multiplexing.
 
-## Milestone 8: hardening and benchmark/demo suite
+## Milestone 8: hardening and benchmark/demo suite *(complete)*
 
-- **Objective:** Prepare a realistic demonstration of correctness and performance boundaries.
-- **Deliverables:** Benchmark plan, repeatable demo scenarios, limit documentation, and hardening notes for operational readiness gaps.
-- **Out of scope:** Claiming production readiness.
-- **Validation artifact:** Benchmark/demo report with scenarios, methodology, known limits, and links to the scripted demos from earlier milestones.
-- **Demo/test expectation:** Present a repeatable suite covering throughput, failover behavior, leader-only reads, recovery latency, fencing rejection, and remaining risks.
-- **Done means:** The repository can demonstrate what v1 proves, what it does not prove, and where the next engineering investment belongs, using repeatable artifacts rather than implied behavior.
+Milestone 8 is complete. The repo now adds explicit clustered startup validation, bounded data-directory ownership checks, a repeatable in-process evaluator for demo and benchmark runs, a manual static-config daemon walkthrough, and reviewer-facing local evaluation guidance for the current v1 boundaries.
+
+- **Objective:** Make the system easier to evaluate, demonstrate, and operate at the end of the v1 milestone train.
+- **Deliverables:** Hardening improvements, benchmark/demo suite, and clear local evaluation guidance.
+- **Out of scope:** Full production readiness program, multi-region work, and advanced shard management.
+- **Validation artifact:** Benchmark/demo report with commands, scenarios, expected outcomes, and known limits.
+- **Demo/test expectation:** A reviewer can start the local cluster, run the demo flows, observe the expected correctness and failure behavior, and run a simple repeatable benchmark without hidden setup.
+- **Done means:** Tenure has a credible, repeatable local evaluation story and the obvious v1 sharp edges are guarded by explicit validation and startup checks.
