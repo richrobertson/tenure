@@ -34,9 +34,12 @@ peers=(
   "$(peer_json node-3 $((RAFT_BASE + 3)) $((API_BASE + 3)))"
 )
 
-peers_json=$(printf '%s,\n' "${peers[@]}")
-peers_json=${peers_json%,\\n}
-peers_json=${peers_json%,}
+peers_json=''
+sep=''
+for peer in "${peers[@]}"; do
+  peers_json+="${sep}${peer}"
+  sep=$',\n'
+done
 
 for idx in 1 2 3; do
   node_id="node-${idx}"
