@@ -49,8 +49,8 @@ object StartupValidation:
       _ <- ensure(localPeer.apiHost == config.apiHost, s"config apiHost '${config.apiHost}' must match local peer apiHost '${localPeer.apiHost}'")
       _ <- ensure(localPeer.apiPort == config.apiPort, s"config apiPort '${config.apiPort}' must match local peer apiPort '${localPeer.apiPort}'")
       _ <- ensureUnique(config.peers.map(_.nodeId), "peer node ids")
-      _ <- ensureUnique(config.peers.map(_.endpoint), "peer raft endpoints")
-      _ <- ensureUnique(config.peers.map(_.apiEndpoint), "peer API endpoints")
+      _ <- ensureUnique(config.peers.map(peer => endpointKey(peer.host, peer.port)), "peer raft endpoints")
+      _ <- ensureUnique(config.peers.map(peer => endpointKey(peer.apiHost, peer.apiPort)), "peer API endpoints")
       _ <- config.peers.traverse_ { peer =>
         ensure(peer.port != peer.apiPort, s"peer '${peer.nodeId}' must use different raft and API ports because v1 does not multiplex transport")
       }
@@ -83,6 +83,15 @@ object StartupValidation:
     normalized == "localhost" ||
     (normalized != "0.0.0.0" && Ipv4Address.fromString(normalized).isDefined) ||
     (normalized != "::" && Ipv6Address.fromString(normalized).isDefined)
+
+  private def endpointKey(host: String, port: Int): String =
+    s"${normalizeHost(host)}:$port"
+
+  private def normalizeHost(raw: String): String =
+    val normalized = raw.trim.toLowerCase
+    if normalized == "localhost" then normalized
+    else
+      Ipv4Address.fromString(normalized).map(_.toString).orElse(Ipv6Address.fromString(normalized).map(_.toString)).getOrElse(normalized)
 
   private def containsInvalidPathChar(raw: String): Boolean =
     raw.exists(_ == '\u0000')

@@ -104,6 +104,22 @@ class StartupValidationSpec extends CatsEffectSuite:
     assert(result.left.exists(_.getMessage.contains("must be an explicit IP or localhost")))
   }
 
+  test("cluster config rejects duplicate endpoints after host normalization") {
+    val config = ClusterConfig(
+      nodeId = "node-1",
+      apiHost = "127.0.0.1",
+      apiPort = 9101,
+      peers = List(
+        PeerNode("node-1", " LOCALHOST ", 9001, "127.0.0.1", 9101),
+        PeerNode("node-2", "localhost", 9001, "127.0.0.1", 9102)
+      ),
+      dataDir = "/tmp/tenure-startup-validation-h"
+    )
+
+    val result = StartupValidation.validateConfig(config)
+    assert(result.left.exists(_.getMessage.contains("peer raft endpoints must be unique")))
+  }
+
   test("cluster config rejects multiplexed raft and api ports") {
     val config = ClusterConfig(
       nodeId = "node-1",

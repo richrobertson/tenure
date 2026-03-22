@@ -23,6 +23,8 @@ import java.time.Instant
 import scala.concurrent.duration.*
 
 object LocalEvaluation extends IOApp:
+  private val LocalHost = "127.0.0.1"
+
   override def run(args: List[String]): IO[ExitCode] =
     parseArgs(args).fold(
       error => IO.println(error).as(ExitCode.Error),
@@ -203,10 +205,11 @@ object LocalEvaluation extends IOApp:
     for
       observability <- Resource.eval(Observability.inMemory[IO])
       injector <- Resource.eval(FailureInjector.controlled[IO](observability, IO.realTime.map(_.toMillis)))
-      peers <- Resource.eval(IO.blocking(parallelPeers(3)))
+      reservations <- Resource.make(IO.blocking(reservePeers(3)))(reservations => IO.blocking(reservations.foreach(_.close())))
+      peers = reservations.map(_.peer)
       dataDirs = peers.map(peer => peer.nodeId -> root.resolve(peer.nodeId).toString).toMap
       configs = peers.map(peer => peer.nodeId -> ClusterConfig(peer.nodeId, peer.apiHost, peer.apiPort, peers, dataDirs(peer.nodeId))).toMap
-      nodes <- peers.traverse(peer => nodeResource(configs(peer.nodeId), dataDirs(peer.nodeId), observability, injector))
+      nodes <- reservations.traverse(reservation => nodeResource(configs(reservation.peer.nodeId), dataDirs(reservation.peer.nodeId), observability, injector, Some(reservation)))
     yield
       val services = nodes.map(node => node.nodeId -> LeaseService.replicated[IO](node, Clock.system[IO], observability = observability)).toMap
       RunningCluster(root, nodes, services, configs, dataDirs, observability, injector)
@@ -215,9 +218,12 @@ object LocalEvaluation extends IOApp:
       config: ClusterConfig,
       dataDir: String,
       observability: InMemoryObservability[IO],
-      injector: ControlledFailureInjector[IO]
+      injector: ControlledFailureInjector[IO],
+      reservation: Option[ReservedPeer] = None
   ): Resource[IO, RaftNode[IO]] =
-    Resource.eval(RaftPersistence.fileBacked[IO](dataDir, config.nodeId, injector, observability)).flatMap(persistence => RaftNode.resource[IO](config, persistence, observability = observability))
+    Resource.eval(reservation.fold(IO.unit)(reserved => IO.blocking(reserved.close()))).flatMap { _ =>
+      Resource.eval(RaftPersistence.fileBacked[IO](dataDir, config.nodeId, injector, observability)).flatMap(persistence => RaftNode.resource[IO](config, persistence, observability = observability))
+    }
 
   private def allocateNode(
       config: ClusterConfig,
@@ -225,7 +231,9 @@ object LocalEvaluation extends IOApp:
       observability: InMemoryObservability[IO],
       injector: ControlledFailureInjector[IO]
   ): IO[(IO[Unit], RaftNode[IO])] =
-    nodeResource(config, dataDir, observability, injector).allocated.map { case (node, release) => (release, node) }
+    nodeResource(config, dataDir, observability, injector).allocated.map {
+      case (node, release) => (release, node)
+    }
 
   private def awaitLeader(nodes: List[RaftNode[IO]]): IO[RaftNode[IO]] =
     eventually("leader election") {
@@ -292,17 +300,13 @@ object LocalEvaluation extends IOApp:
       case Some(path) => IO.blocking(Files.createDirectories(path)).as(path)
       case None       => IO.blocking(Files.createTempDirectory("tenure-milestone-8"))
 
-  private def parallelPeers(size: Int): List[PeerNode] =
+  private def reservePeers(size: Int): List[ReservedPeer] =
     (1 to size).toList.map { idx =>
-      val raftPort = freePort()
-      val apiPort = freePort()
-      PeerNode(s"node-$idx", "127.0.0.1", raftPort, "127.0.0.1", apiPort)
+      val raftSocket = new ServerSocket(0)
+      val apiSocket = new ServerSocket(0)
+      val peer = PeerNode(s"node-$idx", LocalHost, raftSocket.getLocalPort, LocalHost, apiSocket.getLocalPort)
+      ReservedPeer(peer, List(raftSocket, apiSocket))
     }
-
-  private def freePort(): Int =
-    val socket = new ServerSocket(0)
-    try socket.getLocalPort
-    finally socket.close()
 
   private def fromSamples(samples: List[Long]): SampleSummary =
     val sorted = samples.sorted
@@ -413,6 +417,10 @@ object LocalEvaluation extends IOApp:
       injector: ControlledFailureInjector[IO]
   ):
     def service(nodeId: String): LeaseService[IO] = services(nodeId)
+
+  final case class ReservedPeer(peer: PeerNode, sockets: List[ServerSocket]):
+    def close(): Unit =
+      sockets.foreach(socket => if !socket.isClosed then socket.close())
 
   final case class EnvironmentInfo(osName: String, osVersion: String, javaVersion: String, availableProcessors: Int)
   final case class DemoScenario(name: String, success: Boolean, details: Map[String, String])
