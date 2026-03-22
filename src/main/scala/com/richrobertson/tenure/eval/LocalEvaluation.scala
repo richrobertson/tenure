@@ -19,7 +19,6 @@ import io.circe.syntax.*
 import java.net.ServerSocket
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
-import java.time.Instant
 import scala.concurrent.duration.*
 
 object LocalEvaluation extends IOApp:
