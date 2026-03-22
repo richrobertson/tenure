@@ -29,21 +29,21 @@ object LocalEvaluation extends IOApp:
     parseArgs(args).fold(
       error => IO.println(error).as(ExitCode.Error),
       command =>
-        execute(command).flatMap { json =>
+        execute(command).flatMap { result =>
           command.output match
             case Some(path) =>
-              IO.blocking(Files.writeString(path, json, StandardCharsets.UTF_8)).as(ExitCode.Success)
+              writeOutput(path, result.json).as(if result.success then ExitCode.Success else ExitCode.Error)
             case None =>
-              IO.println(json).as(ExitCode.Success)
+              IO.println(result.json).as(if result.success then ExitCode.Success else ExitCode.Error)
         }
     )
 
-  private def execute(command: Command): IO[String] =
+  private def execute(command: Command): IO[EvaluationResult] =
     command match
       case demo: DemoCommand =>
-        runDemo(demo).map(_.asJson.spaces2)
+        runDemo(demo).map(report => EvaluationResult(report.asJson.spaces2, report.scenarios.forall(_.success)))
       case benchmark: BenchmarkCommand =>
-        runBenchmark(benchmark).map(_.asJson.spaces2)
+        runBenchmark(benchmark).map(report => EvaluationResult(report.asJson.spaces2, success = true))
 
   def runDemo(command: DemoCommand = DemoCommand()): IO[DemoReport] =
     prepareRoot(command.workDir).flatMap(root => withCluster(root).use { cluster =>
@@ -59,7 +59,7 @@ object LocalEvaluation extends IOApp:
         leader <- awaitLeader(cluster.nodes)
         follower = cluster.nodes.find(_.nodeId != leader.nodeId).getOrElse(throw new IllegalStateException("expected follower in three-node demo cluster"))
         followerRead <- cluster.service(follower.nodeId).getLease(GetLeaseRequest(principal, tenantId.value, resourceId.value))
-        _ = assert(followerRead.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
+        followerObservedNotLeader = followerRead.left.exists(_.isInstanceOf[ServiceError.NotLeader])
         acquired <- cluster.service(leader.nodeId).acquire(AcquireRequest(principal, tenantId.value, resourceId.value, "holder-a", 15, "demo-acquire"))
         fetched <- cluster.service(leader.nodeId).getLease(GetLeaseRequest(principal, tenantId.value, resourceId.value))
         leaseId <- fetchedLeaseId(fetched)
@@ -76,7 +76,7 @@ object LocalEvaluation extends IOApp:
         delayedAcquire <- cluster.service(leader.nodeId).acquire(AcquireRequest(principal, tenantId.value, delayedResourceId.value, "holder-delay", 30, "delay-1"))
         _ <- cluster.injector.clearDelay(FailurePoint.PersistenceAppend)
         beforeRestartSnapshot <- cluster.observability.snapshot
-        _ = assert(beforeRestartSnapshot.counters.exists(sample => sample.metric.name == "failure_injection_total" && sample.value >= 1L))
+        failureEventsSeen = beforeRestartSnapshot.counters.exists(sample => sample.metric.name == "failure_injection_total" && sample.value >= 1L)
         _ <- leader.shutdown
         replacementLeader <- awaitLeader(cluster.nodes.filterNot(_.nodeId == leader.nodeId))
         restarted <- allocateNode(cluster.configs(leader.nodeId), cluster.dataDirs(leader.nodeId), cluster.observability, cluster.injector)
@@ -87,6 +87,7 @@ object LocalEvaluation extends IOApp:
             snapshot <- cluster.observability.snapshot
           yield snapshot
         ).guarantee(releaseRestarted)
+        restartRecovered = afterRestart.events.exists(_.eventType == "recovery.completed")
         completedAt <- now
       yield
         DemoReport(
@@ -99,11 +100,11 @@ object LocalEvaluation extends IOApp:
           scenarios = List(
             DemoScenario("cluster_bootstrap", success = true, details = Map("leader_node_id" -> leader.nodeId, "peer_count" -> cluster.nodes.size.toString)),
             DemoScenario("lease_lifecycle", success = acquired.isRight && fetched.toOption.exists(_.lease.status == LeaseStatus.Active) && renewed.isRight && released.isRight, details = Map("lease_id" -> leaseId, "get_status" -> fetched.toOption.map(_.lease.status.toString).getOrElse("missing"), "renewed" -> renewed.exists(_.renewed).toString, "released" -> released.exists(_.released).toString)),
-            DemoScenario("not_leader_read", success = true, details = Map("follower_node_id" -> follower.nodeId, "result" -> "NOT_LEADER")),
+            DemoScenario("not_leader_read", success = followerObservedNotLeader, details = Map("follower_node_id" -> follower.nodeId, "result" -> (if followerObservedNotLeader then "NOT_LEADER" else followerRead.fold(_.getClass.getSimpleName, _ => "UNEXPECTED_SUCCESS")))),
             DemoScenario("idempotent_retry", success = firstRetry == secondRetry, details = Map("request_id" -> "retry-1", "same_response" -> (firstRetry == secondRetry).toString)),
             DemoScenario("fencing_turnover", success = fencingAcquire1.toOption.exists(_.lease.fencingToken < fencingAcquire2.toOption.map(_.lease.fencingToken).getOrElse(0L)), details = Map("old_token" -> fencingAcquire1.toOption.map(_.lease.fencingToken).getOrElse(0L).toString, "new_token" -> fencingAcquire2.toOption.map(_.lease.fencingToken).getOrElse(0L).toString)),
-            DemoScenario("failure_injection_delay", success = delayedAcquire.isRight, details = Map("failure_point" -> FailurePoint.PersistenceAppend.name, "delay_ms" -> "175", "failure_events_seen" -> beforeRestartSnapshot.counters.exists(_.metric.name == "failure_injection_total").toString)),
-            DemoScenario("clean_shutdown_restart", success = true, details = Map("stopped_node_id" -> leader.nodeId, "replacement_leader_id" -> replacementLeader.nodeId, "restart_recovered" -> afterRestart.events.exists(_.eventType == "recovery.completed").toString))
+            DemoScenario("failure_injection_delay", success = delayedAcquire.isRight && failureEventsSeen, details = Map("failure_point" -> FailurePoint.PersistenceAppend.name, "delay_ms" -> "175", "failure_events_seen" -> failureEventsSeen.toString)),
+            DemoScenario("clean_shutdown_restart", success = restartRecovered, details = Map("stopped_node_id" -> leader.nodeId, "replacement_leader_id" -> replacementLeader.nodeId, "restart_recovered" -> restartRecovered.toString))
           ),
           knownLimits = knownLimits
         )
@@ -303,6 +304,13 @@ object LocalEvaluation extends IOApp:
       case Some(path) => IO.blocking(Files.createDirectories(path)).as(path)
       case None       => IO.blocking(Files.createTempDirectory("tenure-milestone-8"))
 
+  private def writeOutput(path: Path, json: String): IO[Unit] =
+    IO.blocking {
+      Option(path.getParent).foreach(parent => Files.createDirectories(parent))
+      Files.writeString(path, json, StandardCharsets.UTF_8)
+      ()
+    }
+
   private def reservePeers(size: Int): List[ReservedPeer] =
     (1 to size).toList.map { idx =>
       val raftSocket = new ServerSocket(0)
@@ -409,6 +417,7 @@ object LocalEvaluation extends IOApp:
 
   final case class DemoCommand(workDir: Option[Path] = None, output: Option[Path] = None) extends Command
   final case class BenchmarkCommand(iterations: Int = 20, parallelism: Int = 4, workDir: Option[Path] = None, output: Option[Path] = None) extends Command
+  final case class EvaluationResult(json: String, success: Boolean)
 
   final case class RunningCluster(
       root: Path,

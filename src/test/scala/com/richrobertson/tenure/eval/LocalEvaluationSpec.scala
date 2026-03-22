@@ -1,7 +1,10 @@
 package com.richrobertson.tenure.eval
 
 import cats.effect.IO
+import cats.effect.ExitCode
 import munit.CatsEffectSuite
+
+import java.nio.file.Files
 
 class LocalEvaluationSpec extends CatsEffectSuite:
   override val munitTimeout = scala.concurrent.duration.DurationInt(90).seconds
@@ -51,4 +54,14 @@ class LocalEvaluationSpec extends CatsEffectSuite:
     val invalidPath = s"${0.toChar}bad-path"
     val result = LocalEvaluation.parseArgs(List("demo", "--work-dir", invalidPath))
     assert(result.left.exists(_.contains("invalid --work-dir path")))
+  }
+
+  test("output paths create parent directories when needed") {
+    IO.blocking(Files.createTempDirectory("tenure-eval-output")).flatMap { root =>
+      val output = root.resolve("nested").resolve("benchmark.json")
+      LocalEvaluation.run(List("benchmark", "--iterations", "1", "--parallelism", "1", "--output", output.toString)).map { exitCode =>
+        assertEquals(exitCode, ExitCode.Success)
+        assert(Files.exists(output))
+      }
+    }
   }
