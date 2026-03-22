@@ -26,3 +26,9 @@ class HashRouterSpec extends FunSuite:
 
     assertEquals(mappedGroups.sortBy(_.value), groupIds.sortBy(_.value))
   }
+
+  test("public groups are de-duplicated to match the actual routing set") {
+    val router = HashRouter(Vector(GroupId("group-1"), GroupId("group-1"), GroupId("group-2")))
+
+    assertEquals(router.groups, Vector(GroupId("group-1"), GroupId("group-2")))
+  }

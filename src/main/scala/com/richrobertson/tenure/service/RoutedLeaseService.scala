@@ -27,7 +27,7 @@ private final case class RoutedLeaseService[F[_]: Async](
 
   override def acquire(request: AcquireRequest): F[Either[ServiceError, AcquireResult]] =
     validateAcquire(request, authorization).fold(
-      err => err.asLeft[AcquireResult].pure[F],
+      err => observeEarlyResult("acquire", None, Left(err).map(_ => ())).as(err.asLeft[AcquireResult]),
       valid =>
         route(valid.resourceKey, "acquire").flatMap { decision =>
           // Routed acquires need one admission critical section so tenant-global request IDs
@@ -36,10 +36,11 @@ private final case class RoutedLeaseService[F[_]: Async](
             for
               duplicate <- duplicateAcquire(valid.requestContext, valid.fingerprint)
               result <- duplicate match
-                case Some(existing) => existing.pure[F]
+                case Some(DuplicateCheck.Replay(existing)) => observeEarlyResult("acquire", Some(valid.requestContext), existing.map(_ => ()), dedupe = true).as(existing)
+                case Some(DuplicateCheck.Reject(error)) => observeEarlyResult("acquire", Some(valid.requestContext), Left(error).map(_ => ())).as(error.asLeft[AcquireResult])
                 case None =>
                   validateGlobalActiveLeaseQuota(valid.requestContext.tenantId).flatMap {
-                    case Some(error) => error.asLeft[AcquireResult].pure[F]
+                    case Some(error) => observeEarlyResult("acquire", Some(valid.requestContext), Left(error).map(_ => ())).as(error.asLeft[AcquireResult])
                     case None        => runtime(decision.groupId).service.acquire(request)
                   }
             yield result
@@ -49,35 +50,47 @@ private final case class RoutedLeaseService[F[_]: Async](
 
   override def renew(request: RenewRequest): F[Either[ServiceError, RenewResult]] =
     validateRenew(request, authorization).fold(
-      err => err.asLeft[RenewResult].pure[F],
+      err => observeEarlyResult("renew", None, Left(err).map(_ => ())).as(err.asLeft[RenewResult]),
       valid =>
-        for
-          decision <- route(valid.resourceKey, "renew")
-          duplicate <- duplicateRenew(valid.requestContext, valid.fingerprint)
-          result <- duplicate.fold(runtime(decision.groupId).service.renew(request))(_.pure[F])
-        yield result
+        route(valid.resourceKey, "renew").flatMap { decision =>
+          admissionLock.lock.surround {
+            for
+              duplicate <- duplicateRenew(valid.requestContext, valid.fingerprint)
+              result <- duplicate match
+                case Some(DuplicateCheck.Replay(existing)) => observeEarlyResult("renew", Some(valid.requestContext), existing.map(_ => ()), dedupe = true).as(existing)
+                case Some(DuplicateCheck.Reject(error)) => observeEarlyResult("renew", Some(valid.requestContext), Left(error).map(_ => ())).as(error.asLeft[RenewResult])
+                case None => runtime(decision.groupId).service.renew(request)
+            yield result
+          }
+        }
     )
 
   override def release(request: ReleaseRequest): F[Either[ServiceError, ReleaseResult]] =
     validateRelease(request, authorization).fold(
-      err => err.asLeft[ReleaseResult].pure[F],
+      err => observeEarlyResult("release", None, Left(err).map(_ => ())).as(err.asLeft[ReleaseResult]),
       valid =>
-        for
-          decision <- route(valid.resourceKey, "release")
-          duplicate <- duplicateRelease(valid.requestContext, valid.fingerprint)
-          result <- duplicate.fold(runtime(decision.groupId).service.release(request))(_.pure[F])
-        yield result
+        route(valid.resourceKey, "release").flatMap { decision =>
+          admissionLock.lock.surround {
+            for
+              duplicate <- duplicateRelease(valid.requestContext, valid.fingerprint)
+              result <- duplicate match
+                case Some(DuplicateCheck.Replay(existing)) => observeEarlyResult("release", Some(valid.requestContext), existing.map(_ => ()), dedupe = true).as(existing)
+                case Some(DuplicateCheck.Reject(error)) => observeEarlyResult("release", Some(valid.requestContext), Left(error).map(_ => ())).as(error.asLeft[ReleaseResult])
+                case None => runtime(decision.groupId).service.release(request)
+            yield result
+          }
+        }
     )
 
   override def getLease(request: GetLeaseRequest): F[Either[ServiceError, GetLeaseResult]] =
     validateRead(request, authorization).fold(
-      err => err.asLeft[GetLeaseResult].pure[F],
+      err => observeEarlyResult("get", None, Left(err).map(_ => ())).as(err.asLeft[GetLeaseResult]),
       valid => route(valid.resourceKey, "get").flatMap(decision => runtime(decision.groupId).service.getLease(request))
     )
 
   override def listLeases(request: ListLeasesRequest): F[Either[ServiceError, ListLeasesResult]] =
     validateList(request, authorization).fold(
-      err => err.asLeft[ListLeasesResult].pure[F],
+      err => observeEarlyResult("list", None, Left(err).map(_ => ())).as(err.asLeft[ListLeasesResult]),
       tenantId =>
         observeBroadcast("list", tenantId) *>
           orderedGroupIds.traverse(groupId => runtime(groupId).service.listLeases(request)).map { results =>
@@ -122,24 +135,27 @@ private final case class RoutedLeaseService[F[_]: Async](
         )
     }
 
-  private def duplicateAcquire(requestContext: RequestContext, fingerprint: RequestFingerprint): F[Option[Either[ServiceError, AcquireResult]]] =
+  private def observeEarlyResult(operation: String, requestContext: Option[RequestContext], result: Either[ServiceError, Unit], dedupe: Boolean = false): F[Unit] =
+    ServiceObservability.recordResult(observability, clock, "routed", operation, requestContext, result, dedupe)
+
+  private def duplicateAcquire(requestContext: RequestContext, fingerprint: RequestFingerprint): F[Option[DuplicateCheck[AcquireResult]]] =
     lookupStoredResult(requestContext, fingerprint).map {
-      case Left(error) => Some(Left(error))
-      case Right(Some(stored)) => Some(LeaseMaterializer.replayAcquire(stored.result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation"))))
+      case Left(error) => Some(DuplicateCheck.Reject(error))
+      case Right(Some(stored)) => Some(DuplicateCheck.Replay(LeaseMaterializer.replayAcquire(stored.result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))))
       case Right(None) => None
     }
 
-  private def duplicateRenew(requestContext: RequestContext, fingerprint: RequestFingerprint): F[Option[Either[ServiceError, RenewResult]]] =
+  private def duplicateRenew(requestContext: RequestContext, fingerprint: RequestFingerprint): F[Option[DuplicateCheck[RenewResult]]] =
     lookupStoredResult(requestContext, fingerprint).map {
-      case Left(error) => Some(Left(error))
-      case Right(Some(stored)) => Some(LeaseMaterializer.replayRenew(stored.result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation"))))
+      case Left(error) => Some(DuplicateCheck.Reject(error))
+      case Right(Some(stored)) => Some(DuplicateCheck.Replay(LeaseMaterializer.replayRenew(stored.result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))))
       case Right(None) => None
     }
 
-  private def duplicateRelease(requestContext: RequestContext, fingerprint: RequestFingerprint): F[Option[Either[ServiceError, ReleaseResult]]] =
+  private def duplicateRelease(requestContext: RequestContext, fingerprint: RequestFingerprint): F[Option[DuplicateCheck[ReleaseResult]]] =
     lookupStoredResult(requestContext, fingerprint).map {
-      case Left(error) => Some(Left(error))
-      case Right(Some(stored)) => Some(LeaseMaterializer.replayRelease(stored.result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation"))))
+      case Left(error) => Some(DuplicateCheck.Reject(error))
+      case Right(Some(stored)) => Some(DuplicateCheck.Replay(LeaseMaterializer.replayRelease(stored.result).getOrElse(Left(ServiceError.InvalidRequest("stored request replay type did not match operation")))))
       case Right(None) => None
     }
 
@@ -161,3 +177,7 @@ private final case class RoutedLeaseService[F[_]: Async](
         .map(_.sum)
         .map(activeCount => quotas.validateActiveLeases(quotas.policyFor(tenantId), tenantId, activeCount).leftMap(ServiceError.QuotaExceeded.apply).swap.toOption)
     }
+
+private enum DuplicateCheck[+A]:
+  case Replay(result: Either[ServiceError, A])
+  case Reject(error: ServiceError)

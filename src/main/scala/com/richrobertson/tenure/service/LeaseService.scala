@@ -264,9 +264,13 @@ object LeaseService:
       authorization: Authorization,
       observability: Observability[F]
   ): F[LeaseService[F]] =
-    Mutex[F].map { admissionLock =>
-      RoutedLeaseService(router, groups.map(group => group.groupId -> group).toMap, clock, quotas, authorization, observability, admissionLock)
-    }
+    val duplicateGroupIds = groups.groupBy(_.groupId).collect { case (groupId, entries) if entries.size > 1 => groupId }.toList.sortBy(_.value)
+    if duplicateGroupIds.nonEmpty then
+      Async[F].raiseError(new IllegalArgumentException(s"duplicate group ids when constructing LeaseService.routed: ${duplicateGroupIds.map(_.value).mkString(", ")}"))
+    else
+      Mutex[F].map { admissionLock =>
+        RoutedLeaseService(router, groups.map(group => group.groupId -> group).toMap, clock, quotas, authorization, observability, admissionLock)
+      }
 
 private[service] trait ValidationSupport:
   final case class ValidAcquire(resourceKey: ResourceKey, holderId: ClientId, ttlSeconds: Long, requestContext: RequestContext, fingerprint: RequestFingerprint)

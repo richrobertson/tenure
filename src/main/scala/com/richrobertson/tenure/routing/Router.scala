@@ -17,10 +17,12 @@ trait Router:
 object Router:
   def single(groupId: GroupId = GroupId.Default): Router = HashRouter(Vector(groupId))
 
-final case class HashRouter(groups: Vector[GroupId]) extends Router:
-  require(groups.nonEmpty, "router must contain at least one group")
+final case class HashRouter(private val rawGroups: Vector[GroupId]) extends Router:
+  require(rawGroups.nonEmpty, "router must contain at least one group")
 
-  private val orderedGroups = groups.distinct
+  private val orderedGroups = rawGroups.distinct
+
+  override def groups: Vector[GroupId] = orderedGroups
 
   override def route(resourceKey: ResourceKey): RoutingDecision =
     val hash = stableHash64(resourceKey)

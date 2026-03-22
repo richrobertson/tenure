@@ -123,6 +123,95 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       assert(second.left.exists(_.isInstanceOf[ServiceError.QuotaExceeded]))
   }
 
+  test("concurrent routed renews preserve tenant-global request-id admission") {
+    for
+      runtime <- inMemoryGroups(2)
+      (groups, router, observability, clock) = runtime
+      service <- LeaseService.routed[IO](router, groups, clock, observability)
+      resourceA = resourceForGroup(router, GroupId("group-1"), "renew-a")
+      resourceB = resourceForGroup(router, GroupId("group-2"), "renew-b")
+      acquiredA <- service.acquire(AcquireRequest(principal, tenantId.value, resourceA.value, "holder-a", 10, "acq-a"))
+      acquiredB <- service.acquire(AcquireRequest(principal, tenantId.value, resourceB.value, "holder-b", 10, "acq-b"))
+      leaseIdA = acquiredA.toOption.flatMap(_.lease.leaseId).map(_.value.toString).getOrElse(fail("expected first lease"))
+      leaseIdB = acquiredB.toOption.flatMap(_.lease.leaseId).map(_.value.toString).getOrElse(fail("expected second lease"))
+      firstStarted <- Deferred[IO, Unit]
+      releaseFirst <- Deferred[IO, Unit]
+      secondEntered <- Deferred[IO, Unit]
+      gatedGroups = groups.map {
+        case group if group.groupId == GroupId("group-1") =>
+          wrapGroup(group, beforeRenew = firstStarted.complete(()).void *> releaseFirst.get)
+        case group if group.groupId == GroupId("group-2") =>
+          wrapGroup(group, beforeRenew = secondEntered.complete(()).void)
+        case group => group
+      }
+      lockedService <- LeaseService.routed[IO](router, gatedGroups, clock, observability)
+      firstFiber <- lockedService.renew(RenewRequest(principal, tenantId.value, resourceA.value, leaseIdA, "holder-a", 10, "renew-req")).start
+      _ <- firstStarted.get
+      secondFiber <- lockedService.renew(RenewRequest(principal, tenantId.value, resourceB.value, leaseIdB, "holder-b", 10, "renew-req")).start
+      _ <- IO.sleep(scala.concurrent.duration.DurationInt(200).millis)
+      secondObservedBeforeRelease <- secondEntered.tryGet
+      _ = assertEquals(secondObservedBeforeRelease, None)
+      _ <- releaseFirst.complete(()).void
+      first <- firstFiber.joinWithNever
+      second <- secondFiber.joinWithNever
+    yield
+      assert(first.isRight)
+      assertEquals(second.left.toOption, Some(ServiceError.InvalidRequest("request_id cannot be reused for a different operation, resource, or parameters")))
+  }
+
+  test("concurrent routed releases preserve tenant-global request-id admission") {
+    for
+      runtime <- inMemoryGroups(2)
+      (groups, router, observability, clock) = runtime
+      service <- LeaseService.routed[IO](router, groups, clock, observability)
+      resourceA = resourceForGroup(router, GroupId("group-1"), "release-a")
+      resourceB = resourceForGroup(router, GroupId("group-2"), "release-b")
+      acquiredA <- service.acquire(AcquireRequest(principal, tenantId.value, resourceA.value, "holder-a", 10, "acq-a"))
+      acquiredB <- service.acquire(AcquireRequest(principal, tenantId.value, resourceB.value, "holder-b", 10, "acq-b"))
+      leaseIdA = acquiredA.toOption.flatMap(_.lease.leaseId).map(_.value.toString).getOrElse(fail("expected first lease"))
+      leaseIdB = acquiredB.toOption.flatMap(_.lease.leaseId).map(_.value.toString).getOrElse(fail("expected second lease"))
+      firstStarted <- Deferred[IO, Unit]
+      releaseFirst <- Deferred[IO, Unit]
+      secondEntered <- Deferred[IO, Unit]
+      gatedGroups = groups.map {
+        case group if group.groupId == GroupId("group-1") =>
+          wrapGroup(group, beforeRelease = firstStarted.complete(()).void *> releaseFirst.get)
+        case group if group.groupId == GroupId("group-2") =>
+          wrapGroup(group, beforeRelease = secondEntered.complete(()).void)
+        case group => group
+      }
+      lockedService <- LeaseService.routed[IO](router, gatedGroups, clock, observability)
+      firstFiber <- lockedService.release(ReleaseRequest(principal, tenantId.value, resourceA.value, leaseIdA, "holder-a", "release-req")).start
+      _ <- firstStarted.get
+      secondFiber <- lockedService.release(ReleaseRequest(principal, tenantId.value, resourceB.value, leaseIdB, "holder-b", "release-req")).start
+      _ <- IO.sleep(scala.concurrent.duration.DurationInt(200).millis)
+      secondObservedBeforeRelease <- secondEntered.tryGet
+      _ = assertEquals(secondObservedBeforeRelease, None)
+      _ <- releaseFirst.complete(()).void
+      first <- firstFiber.joinWithNever
+      second <- secondFiber.joinWithNever
+    yield
+      assert(first.isRight)
+      assertEquals(second.left.toOption, Some(ServiceError.InvalidRequest("request_id cannot be reused for a different operation, resource, or parameters")))
+  }
+
+  test("routed duplicate replays and validation failures remain observable") {
+    for
+      runtime <- inMemoryService(2)
+      (service, router, observability, _) = runtime
+      resource = resourceForGroup(router, GroupId("group-1"), "observed-dup")
+      first <- service.acquire(AcquireRequest(principal, tenantId.value, resource.value, "holder-a", 10, "req-dup"))
+      duplicate <- service.acquire(AcquireRequest(principal, tenantId.value, resource.value, "holder-a", 10, "req-dup"))
+      invalid <- service.acquire(AcquireRequest(principal, tenantId.value, resource.value, "", 10, "req-invalid"))
+      snapshot <- observability.snapshot
+    yield
+      assertEquals(duplicate, first)
+      assertEquals(invalid.left.toOption, Some(ServiceError.InvalidRequest("holder_id must be non-empty")))
+      assert(snapshot.counters.exists(sample => sample.metric.name == "duplicate_requests_total" && sample.metric.labels.get("node_id").contains("routed") && sample.value >= 1L))
+      assert(snapshot.events.exists(event => event.eventType == "lease.request.result" && event.requestId.contains("req-dup") && event.result.contains("duplicate_replay")))
+      assert(snapshot.events.exists(event => event.eventType == "lease.request.result" && event.errorCode.contains("INVALID_ARGUMENT")))
+  }
+
   test("observability signals include group_id labels and fields") {
     for
       runtime <- inMemoryService(2)
@@ -138,17 +227,41 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       assert(snapshot.events.exists(event => event.eventType == "routing.decision" && event.fields.get("group_id").contains(expectedGroupId)))
   }
 
+  test("routed service construction rejects duplicate group ids") {
+    for
+      clock <- TestClock.create[IO](start)
+      observability <- Observability.inMemory[IO]
+      group <- GroupRuntime.inMemory[IO](GroupId("group-1"), clock, observability)
+      result <- LeaseService.routed[IO](HashRouter(Vector(GroupId("group-1"))), List(group, group), clock, observability).attempt
+    yield
+      assert(result.left.exists(_.getMessage.contains("duplicate group ids")))
+  }
+
   private def inMemoryService(groupCount: Int): IO[(LeaseService[IO], HashRouter, com.richrobertson.tenure.observability.InMemoryObservability[IO], TestClock[IO])] =
+    for
+      runtime <- inMemoryGroups(groupCount)
+      (groups, router, observability, clock) = runtime
+      service <- LeaseService.routed[IO](router, groups, clock, observability)
+    yield (service, router, observability, clock)
+
+  private def inMemoryGroups(groupCount: Int): IO[(List[GroupRuntime[IO]], HashRouter, com.richrobertson.tenure.observability.InMemoryObservability[IO], TestClock[IO])] =
     for
       clock <- TestClock.create[IO](start)
       observability <- Observability.inMemory[IO]
       selectedGroupIds = (1 to groupCount).toVector.map(idx => GroupId(s"group-$idx"))
       groups <- selectedGroupIds.toList.traverse(groupId => GroupRuntime.inMemory[IO](groupId, clock, observability))
       router = HashRouter(selectedGroupIds)
-      service <- LeaseService.routed[IO](router, groups, clock, observability)
-    yield (service, router, observability, clock)
+    yield (groups, router, observability, clock)
 
   private def wrapAcquire(group: GroupRuntime[IO])(beforeAcquire: IO[Unit]): GroupRuntime[IO] =
+    wrapGroup(group, beforeAcquire = beforeAcquire)
+
+  private def wrapGroup(
+      group: GroupRuntime[IO],
+      beforeAcquire: IO[Unit] = IO.unit,
+      beforeRenew: IO[Unit] = IO.unit,
+      beforeRelease: IO[Unit] = IO.unit
+  ): GroupRuntime[IO] =
     new GroupRuntime[IO]:
       override def groupId: GroupId = group.groupId
       override def readState: IO[ServiceState] = group.readState
@@ -158,10 +271,10 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
             beforeAcquire *> group.service.acquire(request)
 
           override def renew(request: RenewRequest): IO[Either[ServiceError, RenewResult]] =
-            group.service.renew(request)
+            beforeRenew *> group.service.renew(request)
 
           override def release(request: ReleaseRequest): IO[Either[ServiceError, ReleaseResult]] =
-            group.service.release(request)
+            beforeRelease *> group.service.release(request)
 
           override def getLease(request: GetLeaseRequest): IO[Either[ServiceError, GetLeaseResult]] =
             group.service.getLease(request)
