@@ -224,35 +224,21 @@ sequenceDiagram
 
 ## Leader failover and recovery path
 
-```text
-client request
-    |
-    v
-old leader fails
-    |
-    v
-remaining quorum elects new leader
-    |
-    v
-new leader replays durable Raft log / snapshot
-    |
-    v
-state machine becomes authoritative again
-    |
-    v
-clients retry with same request_id for idempotent handling
+```mermaid
+flowchart TD
+    A[Client request in flight] --> B[Old leader fails]
+    B --> C[Remaining quorum elects a new leader]
+    C --> D[New leader restores durable Raft state]
+    D --> E[State machine becomes authoritative again]
+    E --> F[Clients retry with the same request_id]
+    F --> G[Idempotency returns the committed result safely]
 ```
 
 ## Future routing / placement abstraction
 
-```text
-request(tenant_id, resource_id)
-           |
-           v
-placement(tenant_id, resource_id) -> raft_group_id
-           |
-     +-----+-----+
-     |           |
-    v1       future
-  group-1   group-N
+```mermaid
+flowchart TD
+    A[request tenant_id, resource_id] --> B[placement tenant_id, resource_id -> raft_group_id]
+    B --> C[v1: group-1]
+    B --> D[future: group-N]
 ```
