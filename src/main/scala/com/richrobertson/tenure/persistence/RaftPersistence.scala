@@ -121,6 +121,10 @@ private object PersistenceLayout:
   private val managedFiles = List("metadata.json", "log.jsonl", "snapshot.json", markerFileName)
 
   def prepare(root: Path, nodeId: String): Unit =
+    val trimmedNodeId = nodeId.trim
+    if trimmedNodeId.isEmpty then
+      throw new IllegalArgumentException("nodeId must be non-empty before preparing persistence")
+
     if Files.exists(root) && !Files.isDirectory(root) then
       throw new IllegalArgumentException(s"data directory must be a directory path, found file: $root")
 
@@ -142,9 +146,9 @@ private object PersistenceLayout:
         throw new IllegalArgumentException(
           s"data directory $root has an empty '$markerFileName' marker; please fix or remove the directory before reuse"
         )
-      else if storedNodeId != nodeId then
+      else if storedNodeId != trimmedNodeId then
         throw new IllegalArgumentException(
-          s"data directory $root belongs to node '$storedNodeId', not '$nodeId'"
+          s"data directory $root belongs to node '$storedNodeId', not '$trimmedNodeId'"
         )
     else
-      Files.writeString(markerPath, nodeId + "\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW)
+      Files.writeString(markerPath, trimmedNodeId + "\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW)

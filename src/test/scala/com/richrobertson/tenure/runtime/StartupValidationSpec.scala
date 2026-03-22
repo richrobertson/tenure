@@ -251,6 +251,14 @@ class StartupValidationSpec extends CatsEffectSuite:
     }
   }
 
+  test("file-backed persistence rejects blank configured node ids before writing markers") {
+    IO.blocking(Files.createTempDirectory("tenure-startup-blank-node-id")).flatMap { root =>
+      RaftPersistence.fileBacked[IO](root.toString, "   ", Observability.noop[IO]).attempt.map { result =>
+        assert(result.left.exists(_.getMessage.contains("nodeId must be non-empty")))
+      }
+    }
+  }
+
   test("file-backed persistence rejects directory/file shape conflicts") {
     IO.blocking(Files.createTempDirectory("tenure-startup-shape")).flatMap { root =>
       IO.blocking(Files.createDirectories(root.resolve("metadata.json"))) *>
