@@ -62,8 +62,8 @@ sequenceDiagram
     participant L as Raft Leader
     participant SM as Lease State Machine
 
-    C->>L: Renew(tenant_id, resource_id, lease_id, request_id)
-    L->>L: Validate holder, request_id, active lease window
+    C->>L: Renew(tenant_id, resource_id, lease_id, holder_id, ttl_seconds, request_id)
+    L->>L: Validate holder, ttl, request_id, active lease window
     L->>L: Replicate renew command through Raft
     L->>SM: Apply renew
     SM-->>L: updated expiry_time
@@ -178,7 +178,7 @@ sequenceDiagram
     participant F as Followers
 
     O->>N: Stop node cleanly
-    N->>N: Stop runtime loops and wait for in-flight operations
+    N->>N: Stop runtime loops and cancel in-flight operations
     O->>N: Start node with same config and dataDir
     N->>P: Validate node-id marker and reopen persisted state
     N->>L: Rejoin cluster
@@ -208,13 +208,13 @@ flowchart TD
 sequenceDiagram
     participant E as Evaluator
     participant L as Leader
-    participant I as Failure Injector
+    participant I as Failure Injector (PersistenceAppend)
     participant F as Followers
     participant C as Client
 
-    E->>I: Enable delay injection for leader replication path
+    E->>I: Enable delay injection for persistence append (FailurePoint.PersistenceAppend)
     C->>L: Acquire / Renew request
-    L->>I: Inject configured delay
+    L->>I: Inject configured delay on persistence append
     I-->>L: Continue after delay window
     L->>F: Replicate command
     F-->>L: Ack
