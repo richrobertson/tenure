@@ -305,7 +305,11 @@ object LocalEvaluation extends IOApp:
 
   private def prepareRoot(workDir: Option[Path]): IO[Path] =
     workDir match
-      case Some(path) => IO.blocking(Files.createDirectories(path)).as(path)
+      case Some(path) =>
+        IO.blocking {
+          Files.createDirectories(path)
+          Files.createTempDirectory(path, "run-")
+        }
       case None       => IO.blocking(Files.createTempDirectory("tenure-milestone-8"))
 
   private def writeOutput(path: Path, json: String): IO[Unit] =

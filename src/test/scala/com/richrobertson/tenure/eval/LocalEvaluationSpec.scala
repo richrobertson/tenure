@@ -2,6 +2,7 @@ package com.richrobertson.tenure.eval
 
 import cats.effect.IO
 import cats.effect.ExitCode
+import cats.syntax.all.*
 import munit.CatsEffectSuite
 
 import java.nio.file.Files
@@ -70,6 +71,21 @@ class LocalEvaluationSpec extends CatsEffectSuite:
     IO.blocking(Files.createTempFile("tenure-eval-workdir-file", ".tmp")).flatMap { file =>
       LocalEvaluation.run(List("demo", "--work-dir", file.toString)).map { exitCode =>
         assertEquals(exitCode, ExitCode.Error)
+      }
+    }
+  }
+
+  test("provided work dir is treated as a parent and each run gets a fresh child directory") {
+    IO.blocking(Files.createTempDirectory("tenure-eval-parent")).flatMap { parent =>
+      val command = LocalEvaluation.DemoCommand(workDir = Some(parent))
+      (LocalEvaluation.runDemo(command), LocalEvaluation.runDemo(command)).tupled.map { (first, second) =>
+        val firstRoot = java.nio.file.Path.of(first.workDir)
+        val secondRoot = java.nio.file.Path.of(second.workDir)
+        assertEquals(firstRoot.getParent, parent)
+        assertEquals(secondRoot.getParent, parent)
+        assertNotEquals(firstRoot, secondRoot)
+        assert(firstRoot.getFileName.toString.startsWith("run-"))
+        assert(secondRoot.getFileName.toString.startsWith("run-"))
       }
     }
   }

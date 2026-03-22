@@ -40,6 +40,8 @@ sbt "runMain com.richrobertson.tenure.eval.LocalEvaluation demo --output /tmp/te
 cat /tmp/tenure-m8-demo-report.json
 ```
 
+If you pass `--work-dir <path>`, the evaluator treats that path as a parent directory and creates a fresh `run-*` subdirectory for each invocation so repeated demo runs stay comparable.
+
 Expected report shape:
 
 - `command = "demo"`
@@ -62,6 +64,8 @@ The demo evaluator uses explicit in-process `ClusterConfig` values, actual repli
 sbt "runMain com.richrobertson.tenure.eval.LocalEvaluation benchmark --iterations 20 --parallelism 4 --output /tmp/tenure-m8-benchmark.json"
 cat /tmp/tenure-m8-benchmark.json
 ```
+
+With `--work-dir <path>`, benchmark runs also allocate a fresh `run-*` child under that parent instead of reusing the previous Raft data directories.
 
 Expected report shape:
 
