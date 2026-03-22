@@ -127,7 +127,7 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
   }
 
   test("concurrent routed acquires for different tenants do not share the same admission lock") {
-    val otherTenantId = TenantId("tenant-b")
+    val otherTenantId = tenantIdForDifferentStripe(tenantId, "tenant-b")
     val otherPrincipal = Principal("holder-b", otherTenantId)
     for
       clock <- TestClock.create[IO](start)
@@ -297,9 +297,9 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
     wrapGroup(group, beforeAcquire = beforeAcquire)
 
   private def assertStillBlocked(signal: Deferred[IO, Unit]): IO[Either[Unit, Unit]] =
-    signal.tryGet.map {
-      case Some(_) => Left(())
-      case None    => Right(())
+    IO.cede *> IO.race(signal.get, IO.sleep(50.millis)).map {
+      case Left(_)  => Left(())
+      case Right(_) => Right(())
     }
 
   private def wrapGroup(
@@ -337,3 +337,11 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       .map(idx => ResourceId(s"$prefix-$idx"))
       .find(resourceId => router.route(tenantId, resourceId).groupId == groupId)
       .getOrElse(fail(s"expected to find resource for ${groupId.value}"))
+
+  private def tenantIdForDifferentStripe(current: TenantId, prefix: String): TenantId =
+    val currentStripe = TenantAdmissionLocks.stripeIndex(current)
+    (1 to 512)
+      .iterator
+      .map(idx => TenantId(s"$prefix-$idx"))
+      .find(candidate => TenantAdmissionLocks.stripeIndex(candidate) != currentStripe)
+      .getOrElse(fail("expected to find tenant id on a different admission stripe"))

@@ -1,6 +1,6 @@
 package com.richrobertson.tenure.service
 
-import cats.effect.kernel.{Async, Ref}
+import cats.effect.kernel.Async
 import cats.effect.std.Mutex
 import cats.syntax.all.*
 import com.richrobertson.tenure.auth.Authorization
@@ -193,21 +193,15 @@ private enum DuplicateCheck[+A]:
   case Replay(result: Either[ServiceError, A])
   case Reject(error: ServiceError)
 
-private final class TenantAdmissionLocks[F[_]: Async] private (state: Ref[F, Map[TenantId, Mutex[F]]]):
+private final class TenantAdmissionLocks[F[_]: Async] private (stripes: Vector[Mutex[F]]):
   def forTenant(tenantId: TenantId): F[Mutex[F]] =
-    state.get.flatMap { locks =>
-      locks.get(tenantId) match
-        case Some(lock) => lock.pure[F]
-        case None =>
-          Mutex[F].flatMap { newLock =>
-            state.modify { current =>
-              current.get(tenantId) match
-                case Some(existing) => (current, existing)
-                case None           => (current.updated(tenantId, newLock), newLock)
-            }
-          }
-    }
+    stripes(TenantAdmissionLocks.stripeIndex(tenantId, stripes.size)).pure[F]
 
-private object TenantAdmissionLocks:
+private[service] object TenantAdmissionLocks:
+  val StripeCount = 64
+
+  def stripeIndex(tenantId: TenantId, stripeCount: Int = StripeCount): Int =
+    (tenantId.hashCode & Int.MaxValue) % stripeCount
+
   def create[F[_]: Async]: F[TenantAdmissionLocks[F]] =
-    Ref.of[F, Map[TenantId, Mutex[F]]](Map.empty).map(new TenantAdmissionLocks(_))
+    List.fill(StripeCount)(Mutex[F]).sequence.map(mutexes => new TenantAdmissionLocks(mutexes.toVector))
