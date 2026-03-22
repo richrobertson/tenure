@@ -73,7 +73,7 @@ object LocalEvaluation extends IOApp:
         _ <- cluster.service(leader.nodeId).release(ReleaseRequest(principal, tenantId.value, fencingResourceId.value, fencingLeaseId1, "holder-old", "fence-release")).map(assertRight)
         fencingAcquire2 <- cluster.service(leader.nodeId).acquire(AcquireRequest(principal, tenantId.value, fencingResourceId.value, "holder-new", 10, "fence-2"))
         _ <- cluster.injector.setDelay(FailurePoint.PersistenceAppend, 175)
-        delayedAcquire <- cluster.service(leader.nodeId).acquire(AcquireRequest(principal, tenantId.value, delayedResourceId.value, "holder-delay", 10, "delay-1"))
+        delayedAcquire <- cluster.service(leader.nodeId).acquire(AcquireRequest(principal, tenantId.value, delayedResourceId.value, "holder-delay", 30, "delay-1"))
         _ <- cluster.injector.clearDelay(FailurePoint.PersistenceAppend)
         beforeRestartSnapshot <- cluster.observability.snapshot
         _ = assert(beforeRestartSnapshot.counters.exists(sample => sample.metric.name == "failure_injection_total" && sample.value >= 1L))
