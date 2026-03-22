@@ -81,9 +81,12 @@ object LocalEvaluation extends IOApp:
         replacementLeader <- awaitLeader(cluster.nodes.filterNot(_.nodeId == leader.nodeId))
         restarted <- allocateNode(cluster.configs(leader.nodeId), cluster.dataDirs(leader.nodeId), cluster.observability, cluster.injector)
         (releaseRestarted, restartedNode) = restarted
-        _ <- awaitFollowerLeaseStatus(restartedNode, tenantId, delayedResourceId, LeaseStatus.Active)
-        afterRestart <- cluster.observability.snapshot
-        _ <- releaseRestarted
+        afterRestart <- (
+          for
+            _ <- awaitFollowerLeaseStatus(restartedNode, tenantId, delayedResourceId, LeaseStatus.Active)
+            snapshot <- cluster.observability.snapshot
+          yield snapshot
+        ).guarantee(releaseRestarted)
         completedAt <- now
       yield
         DemoReport(

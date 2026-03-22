@@ -94,9 +94,10 @@ object StartupValidation:
 
   private def normalizeHost(raw: String): String =
     val normalized = raw.trim.toLowerCase
-    if normalized == "localhost" then normalized
-    else
-      Ipv4Address.fromString(normalized).map(_.toString).orElse(Ipv6Address.fromString(normalized).map(_.toString)).getOrElse(normalized)
+    val loopbackNormalized =
+      if normalized == "localhost" then "127.0.0.1"
+      else normalized
+    Ipv4Address.fromString(loopbackNormalized).map(_.toString).orElse(Ipv6Address.fromString(loopbackNormalized).map(_.toString)).getOrElse(loopbackNormalized)
 
   private def containsInvalidPathChar(raw: String): Boolean =
     raw.exists(_ == '\u0000')
