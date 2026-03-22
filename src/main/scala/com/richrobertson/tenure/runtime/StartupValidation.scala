@@ -41,6 +41,7 @@ object StartupValidation:
     for
       _ <- nonEmpty("nodeId", config.nodeId)
       _ <- nonEmpty("dataDir", config.dataDir)
+      _ <- noSurroundingWhitespace("config apiHost", config.apiHost)
       _ <- ensure(config.peers.nonEmpty, "peers must contain at least one node")
       _ <- config.peers.traverse_(validatePeer)
       localPeers = config.peers.filter(_.nodeId == config.nodeId)

@@ -89,6 +89,21 @@ class StartupValidationSpec extends CatsEffectSuite:
     assert(result.isRight)
   }
 
+  test("cluster config rejects apiHost values with surrounding whitespace") {
+    val config = ClusterConfig(
+      nodeId = "node-1",
+      apiHost = " localhost ",
+      apiPort = 9101,
+      peers = List(
+        PeerNode("node-1", "127.0.0.1", 9001, "localhost", 9101)
+      ),
+      dataDir = "/tmp/tenure-startup-validation-api-host-whitespace"
+    )
+
+    val result = StartupValidation.validateConfig(config)
+    assert(result.left.exists(_.getMessage.contains("config apiHost must not include leading or trailing whitespace")))
+  }
+
   test("cluster config rejects host values with embedded ports") {
     val config = ClusterConfig(
       nodeId = "node-1",
