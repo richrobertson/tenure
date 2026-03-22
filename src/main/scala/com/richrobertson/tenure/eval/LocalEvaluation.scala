@@ -59,14 +59,15 @@ object LocalEvaluation extends IOApp:
         followerRead <- cluster.service(follower.nodeId).getLease(GetLeaseRequest(principal, tenantId.value, resourceId.value))
         _ = assert(followerRead.left.exists(_.isInstanceOf[ServiceError.NotLeader]))
         acquired <- cluster.service(leader.nodeId).acquire(AcquireRequest(principal, tenantId.value, resourceId.value, "holder-a", 15, "demo-acquire"))
-        leaseId = leaseIdOf(acquired)
         fetched <- cluster.service(leader.nodeId).getLease(GetLeaseRequest(principal, tenantId.value, resourceId.value))
+        leaseId <- fetchedLeaseId(fetched)
         renewed <- cluster.service(leader.nodeId).renew(RenewRequest(principal, tenantId.value, resourceId.value, leaseId, "holder-a", 20, "demo-renew"))
         released <- cluster.service(leader.nodeId).release(ReleaseRequest(principal, tenantId.value, resourceId.value, leaseId, "holder-a", "demo-release"))
         firstRetry <- cluster.service(leader.nodeId).acquire(AcquireRequest(principal, tenantId.value, retryResourceId.value, "holder-r", 10, "retry-1"))
         secondRetry <- cluster.service(leader.nodeId).acquire(AcquireRequest(principal, tenantId.value, retryResourceId.value, "holder-r", 10, "retry-1"))
         fencingAcquire1 <- cluster.service(leader.nodeId).acquire(AcquireRequest(principal, tenantId.value, fencingResourceId.value, "holder-old", 10, "fence-1"))
-        fencingLeaseId1 = leaseIdOf(fencingAcquire1)
+        fencingRead1 <- cluster.service(leader.nodeId).getLease(GetLeaseRequest(principal, tenantId.value, fencingResourceId.value))
+        fencingLeaseId1 <- fetchedLeaseId(fencingRead1)
         _ <- cluster.service(leader.nodeId).release(ReleaseRequest(principal, tenantId.value, fencingResourceId.value, fencingLeaseId1, "holder-old", "fence-release")).map(assertRight)
         fencingAcquire2 <- cluster.service(leader.nodeId).acquire(AcquireRequest(principal, tenantId.value, fencingResourceId.value, "holder-new", 10, "fence-2"))
         _ <- cluster.injector.setDelay(FailurePoint.PersistenceAppend, 175)
@@ -119,8 +120,9 @@ object LocalEvaluation extends IOApp:
         }
         renewSamples <- (1 to command.iterations).toList.traverse { idx =>
           for
-            acquired <- service.acquire(AcquireRequest(principal, tenantId.value, s"renew-$idx", "holder-r", 10, s"renew-acquire-$idx"))
-            leaseId = leaseIdOf(acquired)
+            _ <- service.acquire(AcquireRequest(principal, tenantId.value, s"renew-$idx", "holder-r", 10, s"renew-acquire-$idx")).flatMap(assertRightIO)
+            fetched <- service.getLease(GetLeaseRequest(principal, tenantId.value, s"renew-$idx"))
+            leaseId <- fetchedLeaseId(fetched)
             millis <- timedMillis {
               service.renew(RenewRequest(principal, tenantId.value, s"renew-$idx", leaseId, "holder-r", 12, s"renew-$idx")).flatMap(assertRightIO)
             }
@@ -128,16 +130,18 @@ object LocalEvaluation extends IOApp:
         }
         releaseSamples <- (1 to command.iterations).toList.traverse { idx =>
           for
-            acquired <- service.acquire(AcquireRequest(principal, tenantId.value, s"release-$idx", "holder-x", 10, s"release-acquire-$idx"))
-            leaseId = leaseIdOf(acquired)
+            _ <- service.acquire(AcquireRequest(principal, tenantId.value, s"release-$idx", "holder-x", 10, s"release-acquire-$idx")).flatMap(assertRightIO)
+            fetched <- service.getLease(GetLeaseRequest(principal, tenantId.value, s"release-$idx"))
+            leaseId <- fetchedLeaseId(fetched)
             millis <- timedMillis {
               service.release(ReleaseRequest(principal, tenantId.value, s"release-$idx", leaseId, "holder-x", s"release-$idx")).flatMap(assertRightIO)
             }
           yield millis
         }
         throughput <- throughputScenario(service, principal, tenantId, command.iterations * command.parallelism, command.parallelism)
-        failoverBaseline <- service.acquire(AcquireRequest(principal, tenantId.value, "failover-resource", "holder-f", 20, "failover-acquire"))
-        failoverLeaseId = leaseIdOf(failoverBaseline)
+        _ <- service.acquire(AcquireRequest(principal, tenantId.value, "failover-resource", "holder-f", 20, "failover-acquire")).flatMap(assertRightIO)
+        failoverRead <- service.getLease(GetLeaseRequest(principal, tenantId.value, "failover-resource"))
+        failoverLeaseId <- fetchedLeaseId(failoverRead)
         failoverMillis <- timedMillis {
           leader.shutdown *>
             awaitLeader(cluster.nodes.filterNot(_.nodeId == leader.nodeId)).flatMap { replacement =>
@@ -276,8 +280,12 @@ object LocalEvaluation extends IOApp:
       case Right(value) => IO.pure(value)
       case Left(error)  => IO.raiseError(new IllegalStateException(s"expected success, got $error"))
 
-  private def leaseIdOf(result: Either[ServiceError, AcquireResult]): String =
-    result.toOption.flatMap(_.lease.leaseId).map(_.value.toString).getOrElse(throw new IllegalStateException("missing lease id"))
+  private def fetchedLeaseId(result: Either[ServiceError, GetLeaseResult]): IO[String] =
+    result match
+      case Right(lease) =>
+        IO.fromOption(lease.lease.leaseId.map(_.value.toString))(new IllegalStateException("missing lease id"))
+      case Left(error) =>
+        IO.raiseError(new IllegalStateException(s"expected success, got $error"))
 
   private def prepareRoot(workDir: Option[Path]): IO[Path] =
     workDir match
