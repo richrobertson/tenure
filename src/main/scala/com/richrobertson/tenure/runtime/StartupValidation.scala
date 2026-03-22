@@ -10,9 +10,9 @@ import java.nio.file.{Files, InvalidPathException, Path, Paths}
 object StartupValidation:
   def validateClusteredConfig[F[_]: Sync](config: ClusterConfig): F[ClusterConfig] =
     for
-      _ <- Sync[F].fromEither(validateConfig(config))
-      _ <- validateDataDir(config.dataDir, context = s"dataDir for node ${config.nodeId}")
-    yield config
+      validatedConfig <- Sync[F].fromEither(validateConfig(config))
+      validatedPath <- validateDataDir(validatedConfig.dataDir, context = s"dataDir for node ${validatedConfig.nodeId}")
+    yield validatedConfig.copy(dataDir = validatedPath.toString)
 
   def validateDataDir[F[_]: Sync](rawPath: String, context: String): F[Path] =
     Sync[F].blocking {
@@ -59,6 +59,8 @@ object StartupValidation:
   private def validatePeer(peer: PeerNode): Either[IllegalArgumentException, Unit] =
     for
       _ <- nonEmpty("peer.nodeId", peer.nodeId)
+      _ <- noSurroundingWhitespace(s"peer '${peer.nodeId}' raft host", peer.host)
+      _ <- noSurroundingWhitespace(s"peer '${peer.nodeId}' apiHost", peer.apiHost)
       _ <- ensure(isExplicitHost(peer.host), s"peer '${peer.nodeId}' raft host '${peer.host}' must be an explicit IP or localhost; DNS names are not supported in v1")
       _ <- ensure(isExplicitHost(peer.apiHost), s"peer '${peer.nodeId}' apiHost '${peer.apiHost}' must be an explicit IP or localhost; DNS names are not supported in v1")
       _ <- validPort(peer.port, s"peer '${peer.nodeId}' raft port")
@@ -70,6 +72,9 @@ object StartupValidation:
 
   private def validPort(port: Int, label: String): Either[IllegalArgumentException, Unit] =
     ensure(port >= 1 && port <= 65535, s"$label must be between 1 and 65535, found $port")
+
+  private def noSurroundingWhitespace(label: String, value: String): Either[IllegalArgumentException, Unit] =
+    ensure(value == value.trim, s"$label must not include leading or trailing whitespace")
 
   private def ensureUnique(values: List[String], label: String): Either[IllegalArgumentException, Unit] =
     val duplicates = values.groupBy(identity).collect { case (value, entries) if entries.size > 1 => value }.toList.sorted

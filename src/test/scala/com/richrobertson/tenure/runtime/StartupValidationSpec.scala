@@ -110,7 +110,7 @@ class StartupValidationSpec extends CatsEffectSuite:
       apiHost = "127.0.0.1",
       apiPort = 9101,
       peers = List(
-        PeerNode("node-1", " LOCALHOST ", 9001, "127.0.0.1", 9101),
+        PeerNode("node-1", "LOCALHOST", 9001, "127.0.0.1", 9101),
         PeerNode("node-2", "localhost", 9001, "127.0.0.1", 9102)
       ),
       dataDir = "/tmp/tenure-startup-validation-h"
@@ -118,6 +118,21 @@ class StartupValidationSpec extends CatsEffectSuite:
 
     val result = StartupValidation.validateConfig(config)
     assert(result.left.exists(_.getMessage.contains("peer raft endpoints must be unique")))
+  }
+
+  test("cluster config rejects peer hosts with surrounding whitespace") {
+    val config = ClusterConfig(
+      nodeId = "node-1",
+      apiHost = "127.0.0.1",
+      apiPort = 9101,
+      peers = List(
+        PeerNode("node-1", " localhost ", 9001, "127.0.0.1", 9101)
+      ),
+      dataDir = "/tmp/tenure-startup-validation-i"
+    )
+
+    val result = StartupValidation.validateConfig(config)
+    assert(result.left.exists(_.getMessage.contains("must not include leading or trailing whitespace")))
   }
 
   test("cluster config rejects multiplexed raft and api ports") {
@@ -148,6 +163,25 @@ class StartupValidationSpec extends CatsEffectSuite:
     val result = StartupValidation.validateDataDir[IO](invalidPath, "demo dataDir").attempt
     result.map { outcome =>
       assert(outcome.left.exists(_.getMessage.contains("demo dataDir must be a valid path")))
+    }
+  }
+
+  test("clustered startup returns trimmed data directories") {
+    IO.blocking(Files.createTempDirectory("tenure-startup-trimmed-data-dir")).flatMap { root =>
+      val rawDataDir = s"  ${root.resolve("node-1")}  "
+      val config = ClusterConfig(
+        nodeId = "node-1",
+        apiHost = "127.0.0.1",
+        apiPort = 9101,
+        peers = List(
+          PeerNode("node-1", "127.0.0.1", 9001, "127.0.0.1", 9101)
+        ),
+        dataDir = rawDataDir
+      )
+
+      StartupValidation.validateClusteredConfig[IO](config).map { validated =>
+        assertEquals(validated.dataDir, root.resolve("node-1").toString)
+      }
     }
   }
 
