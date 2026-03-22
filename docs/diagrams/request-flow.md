@@ -27,7 +27,7 @@ flowchart TD
     E --> F[Materialized ServiceState]
     C --> G[Persisted metadata.json]
     D --> H[Persisted log.jsonl]
-    E --> I[Occasional persisted snapshot.json (threshold-based)]
+    E --> I[Occasional threshold-based snapshot.json write]
     J[node-id marker and dataDir validation] --> G
     J --> H
     J --> I
