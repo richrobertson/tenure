@@ -27,7 +27,7 @@ flowchart TD
     E --> F[Materialized ServiceState]
     C --> G[Persisted metadata.json]
     D --> H[Persisted log.jsonl]
-    E --> I[Persisted snapshot.json]
+    E --> I[Occasional persisted snapshot.json (threshold-based)]
     J[node-id marker and dataDir validation] --> G
     J --> H
     J --> I
@@ -178,7 +178,7 @@ sequenceDiagram
     participant F as Followers
 
     O->>N: Stop node cleanly
-    N->>P: Flush log/snapshot state
+    N->>N: Stop runtime loops and wait for in-flight operations
     O->>N: Start node with same config and dataDir
     N->>P: Validate node-id marker and reopen persisted state
     N->>L: Rejoin cluster
