@@ -66,7 +66,7 @@ object Main extends IOApp:
       groupObservability = Observability.scoped(observability, Map("group_id" -> GroupId.Default.value), Map("group_id" -> GroupId.Default.value))
       persistence <- Resource.eval(RaftPersistence.fileBacked[IO](config.dataDir, config.nodeId, groupObservability))
       raftNode <- RaftNode.resource[IO](config, persistence, observability = groupObservability)
-      group = GroupRuntime.replicated[IO](GroupId.Default, raftNode, Clock.system[IO], groupObservability)
+      group = GroupRuntime.replicated[IO](GroupId.Default, raftNode, Clock.system[IO], observability)
       service <- Resource.eval(LeaseService.routed[IO](HashRouter(Vector(GroupId.Default)), List(group), Clock.system[IO], observability = observability))
       host <- Resource.eval(parseHost(config.apiHost, context = s"cluster API host for node ${config.nodeId}", fallback = Some("127.0.0.1")))
       port <- Resource.eval(parsePort(config.apiPort, context = s"cluster API port for node ${config.nodeId}"))

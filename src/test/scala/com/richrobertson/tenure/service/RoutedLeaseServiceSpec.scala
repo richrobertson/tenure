@@ -12,6 +12,7 @@ import com.richrobertson.tenure.time.TestClock
 import munit.CatsEffectSuite
 
 import java.time.Instant
+import scala.concurrent.duration.*
 
 class RoutedLeaseServiceSpec extends CatsEffectSuite:
   private val start = Instant.parse("2026-03-21T12:00:00Z")
@@ -123,6 +124,41 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
     yield
       assert(first.isRight)
       assert(second.left.exists(_.isInstanceOf[ServiceError.QuotaExceeded]))
+  }
+
+  test("concurrent routed acquires for different tenants do not share the same admission lock") {
+    val otherTenantId = TenantId("tenant-b")
+    val otherPrincipal = Principal("holder-b", otherTenantId)
+    for
+      clock <- TestClock.create[IO](start)
+      observability <- Observability.inMemory[IO]
+      groups <- groupIds.take(2).toList.traverse(groupId => GroupRuntime.inMemory[IO](groupId, clock, observability))
+      router = HashRouter(groupIds.take(2))
+      resourceA = resourceForGroup(router, tenantId, GroupId("group-1"), "tenant-a")
+      resourceB = resourceForGroup(router, otherTenantId, GroupId("group-2"), "tenant-b")
+      firstStarted <- Deferred[IO, Unit]
+      secondStarted <- Deferred[IO, Unit]
+      releaseFirst <- Deferred[IO, Unit]
+      secondEntered <- Deferred[IO, Unit]
+      gatedGroups = groups.map {
+        case group if group.groupId == GroupId("group-1") =>
+          wrapAcquire(group)(firstStarted.complete(()).void *> releaseFirst.get)
+        case group if group.groupId == GroupId("group-2") =>
+          wrapAcquire(group)(secondEntered.complete(()).void)
+        case group => group
+      }
+      service <- LeaseService.routed[IO](router, gatedGroups, clock, observability)
+      firstFiber <- service.acquire(AcquireRequest(principal, tenantId.value, resourceA.value, "holder-a", 10, "req-tenant-a")).start
+      _ <- firstStarted.get
+      secondFiber <- (secondStarted.complete(()).void *> service.acquire(AcquireRequest(otherPrincipal, otherTenantId.value, resourceB.value, "holder-b", 10, "req-tenant-b"))).start
+      _ <- secondStarted.get
+      _ <- secondEntered.get.timeoutTo(1.second, IO.raiseError(new AssertionError("expected different-tenant acquire to reach group-local execution before the first tenant releases")))
+      _ <- releaseFirst.complete(()).void
+      first <- firstFiber.joinWithNever
+      second <- secondFiber.joinWithNever
+    yield
+      assert(first.isRight)
+      assert(second.isRight)
   }
 
   test("concurrent routed renews preserve tenant-global request-id admission") {
@@ -293,6 +329,9 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
             group.service.listLeases(request)
 
   private def resourceForGroup(router: HashRouter, groupId: GroupId, prefix: String): ResourceId =
+    resourceForGroup(router, tenantId, groupId, prefix)
+
+  private def resourceForGroup(router: HashRouter, tenantId: TenantId, groupId: GroupId, prefix: String): ResourceId =
     (1 to 512)
       .iterator
       .map(idx => ResourceId(s"$prefix-$idx"))

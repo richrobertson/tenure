@@ -76,7 +76,7 @@ class MultiGroupRecoverySpec extends CatsEffectSuite:
       groupObservability = Observability.scoped(observability, Map("group_id" -> groupId.value), Map("group_id" -> groupId.value))
       persistence <- Resource.eval(RaftPersistence.fileBacked[IO](dataDir, config.nodeId, groupObservability))
       node <- RaftNode.resource[IO](config, persistence, observability = groupObservability)
-    yield RunningGroup(GroupRuntime.replicated[IO](groupId, node, Clock.system[IO], groupObservability), node)
+    yield RunningGroup(GroupRuntime.replicated[IO](groupId, node, Clock.system[IO], observability), node)
 
   private def awaitLeader(node: RaftNode[IO]): IO[Unit] =
     eventually("single-node leader election") {

@@ -268,8 +268,8 @@ object LeaseService:
     if duplicateGroupIds.nonEmpty then
       Async[F].raiseError(new IllegalArgumentException(s"duplicate group ids when constructing LeaseService.routed: ${duplicateGroupIds.map(_.value).mkString(", ")}"))
     else
-      Mutex[F].map { admissionLock =>
-        RoutedLeaseService(router, groups.map(group => group.groupId -> group).toMap, clock, quotas, authorization, observability, admissionLock)
+      TenantAdmissionLocks.create[F].map { admissionLocks =>
+        RoutedLeaseService(router, groups.map(group => group.groupId -> group).toMap, clock, quotas, authorization, observability, admissionLocks)
       }
 
 private[service] trait ValidationSupport:

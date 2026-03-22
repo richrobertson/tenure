@@ -37,7 +37,7 @@ This still exposes the same HTTP API:
 - `GET /v1/tenants/{tenant_id}/leases`
 
 The difference is internal: requests are routed to a logical group before per-group execution.
-Routed acquires still preserve tenant-global request-id deduplication and active-lease quota checks before group-local mutation.
+Routed mutating requests still preserve tenant-scoped request-id deduplication, and acquires still enforce active-lease quota checks, before group-local mutation.
 
 ## What to observe
 

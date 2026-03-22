@@ -1,6 +1,6 @@
 package com.richrobertson.tenure.service
 
-import cats.effect.kernel.Async
+import cats.effect.kernel.{Async, Ref}
 import cats.effect.std.Mutex
 import cats.syntax.all.*
 import com.richrobertson.tenure.auth.Authorization
@@ -18,7 +18,7 @@ private final case class RoutedLeaseService[F[_]: Async](
     quotas: TenantQuotaRegistry,
     authorization: Authorization,
     observability: Observability[F],
-    admissionLock: Mutex[F]
+    admissionLocks: TenantAdmissionLocks[F]
 ) extends LeaseService[F]
     with ValidationSupport:
   private val orderedGroupIds = router.groups.distinct
@@ -30,9 +30,9 @@ private final case class RoutedLeaseService[F[_]: Async](
       err => observeEarlyResult("acquire", None, Left(err).map(_ => ())).as(err.asLeft[AcquireResult]),
       valid =>
         route(valid.resourceKey, "acquire").flatMap { decision =>
-          // Routed acquires need one admission critical section so tenant-global request IDs
-          // and active-lease quotas remain correct across groups.
-          admissionLock.lock.surround {
+          // Routed acquires need one tenant-scoped admission critical section so request IDs
+          // and active-lease quotas remain correct across groups without blocking other tenants.
+          withAdmissionLock(valid.requestContext.tenantId) {
             for
               duplicate <- duplicateAcquire(valid.requestContext, valid.fingerprint)
               result <- duplicate match
@@ -53,7 +53,7 @@ private final case class RoutedLeaseService[F[_]: Async](
       err => observeEarlyResult("renew", None, Left(err).map(_ => ())).as(err.asLeft[RenewResult]),
       valid =>
         route(valid.resourceKey, "renew").flatMap { decision =>
-          admissionLock.lock.surround {
+          withAdmissionLock(valid.requestContext.tenantId) {
             for
               duplicate <- duplicateRenew(valid.requestContext, valid.fingerprint)
               result <- duplicate match
@@ -70,7 +70,7 @@ private final case class RoutedLeaseService[F[_]: Async](
       err => observeEarlyResult("release", None, Left(err).map(_ => ())).as(err.asLeft[ReleaseResult]),
       valid =>
         route(valid.resourceKey, "release").flatMap { decision =>
-          admissionLock.lock.surround {
+          withAdmissionLock(valid.requestContext.tenantId) {
             for
               duplicate <- duplicateRelease(valid.requestContext, valid.fingerprint)
               result <- duplicate match
@@ -102,6 +102,9 @@ private final case class RoutedLeaseService[F[_]: Async](
 
   private def runtime(groupId: GroupId): GroupRuntime[F] =
     runtimes.getOrElse(groupId, throw new IllegalStateException(s"missing runtime for ${groupId.value}"))
+
+  private def withAdmissionLock[A](tenantId: TenantId)(fa: F[A]): F[A] =
+    admissionLocks.forTenant(tenantId).flatMap(_.lock.surround(fa))
 
   private def route(resourceKey: ResourceKey, operation: String): F[com.richrobertson.tenure.routing.RoutingDecision] =
     val decision = router.route(resourceKey)
@@ -189,3 +192,22 @@ private final case class RoutedLeaseService[F[_]: Async](
 private enum DuplicateCheck[+A]:
   case Replay(result: Either[ServiceError, A])
   case Reject(error: ServiceError)
+
+private final class TenantAdmissionLocks[F[_]: Async] private (state: Ref[F, Map[TenantId, Mutex[F]]]):
+  def forTenant(tenantId: TenantId): F[Mutex[F]] =
+    state.get.flatMap { locks =>
+      locks.get(tenantId) match
+        case Some(lock) => lock.pure[F]
+        case None =>
+          Mutex[F].flatMap { newLock =>
+            state.modify { current =>
+              current.get(tenantId) match
+                case Some(existing) => (current, existing)
+                case None           => (current.updated(tenantId, newLock), newLock)
+            }
+          }
+    }
+
+private object TenantAdmissionLocks:
+  def create[F[_]: Async]: F[TenantAdmissionLocks[F]] =
+    Ref.of[F, Map[TenantId, Mutex[F]]](Map.empty).map(new TenantAdmissionLocks(_))
