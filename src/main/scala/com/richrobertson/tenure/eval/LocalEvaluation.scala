@@ -370,13 +370,23 @@ object LocalEvaluation extends IOApp:
         case "--output" :: Nil => Left("--output requires a value")
         case "--iterations" :: Nil => Left("--iterations requires a value")
         case "--parallelism" :: Nil => Left("--parallelism requires a value")
-        case "--work-dir" :: value :: tail => loop(tail, Some(Path.of(value)), output, extras)
-        case "--output" :: value :: tail   => loop(tail, workDir, Some(Path.of(value)), extras)
+        case "--work-dir" :: value :: tail =>
+          parsePathOption(value, "--work-dir").flatMap(path => loop(tail, Some(path), output, extras))
+        case "--output" :: value :: tail =>
+          parsePathOption(value, "--output").flatMap(path => loop(tail, workDir, Some(path), extras))
         case "--iterations" :: value :: tail => loop(tail, workDir, output, extras.updated("iterations", value))
         case "--parallelism" :: value :: tail => loop(tail, workDir, output, extras.updated("parallelism", value))
         case option :: _ => Left(s"unknown option: $option")
 
     loop(args, None, None, Map.empty)
+
+  private def parsePathOption(raw: String, flag: String): Either[String, Path] =
+    if raw.contains('\u0000') then
+      Left(s"invalid $flag path: '$raw'")
+    else
+      Either
+        .catchNonFatal(Path.of(raw))
+        .leftMap(_ => s"invalid $flag path: '$raw'")
 
   private def parsePositiveInt(raw: Option[String], label: String, default: Int): Either[String, Int] =
     raw match

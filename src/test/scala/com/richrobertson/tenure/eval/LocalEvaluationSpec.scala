@@ -46,3 +46,9 @@ class LocalEvaluationSpec extends CatsEffectSuite:
     val result = LocalEvaluation.parseArgs(List("benchmark", "--work-dir"))
     assert(result.left.exists(_.contains("--work-dir requires a value")))
   }
+
+  test("argument parsing reports invalid paths explicitly") {
+    val invalidPath = s"${0.toChar}bad-path"
+    val result = LocalEvaluation.parseArgs(List("demo", "--work-dir", invalidPath))
+    assert(result.left.exists(_.contains("invalid --work-dir path")))
+  }

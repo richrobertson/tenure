@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import com.comcast.ip4s.{Ipv4Address, Ipv6Address}
 import com.richrobertson.tenure.raft.{ClusterConfig, PeerNode}
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, InvalidPathException, Path, Paths}
 
 object StartupValidation:
   def validateClusteredConfig[F[_]: Sync](config: ClusterConfig): F[ClusterConfig] =
@@ -17,8 +17,14 @@ object StartupValidation:
   def validateDataDir[F[_]: Sync](rawPath: String, context: String): F[Path] =
     Sync[F].blocking {
       val trimmed = rawPath.trim
+      if containsInvalidPathChar(rawPath) then
+        throw new IllegalArgumentException(s"$context must be a valid path, found '$rawPath'")
       require(trimmed.nonEmpty, s"$context must be non-empty")
-      val path = Paths.get(trimmed)
+      val path =
+        try Paths.get(trimmed)
+        catch
+          case _: InvalidPathException =>
+            throw new IllegalArgumentException(s"$context must be a valid path, found '$rawPath'")
 
       if Files.exists(path) && !Files.isDirectory(path) then
         throw new IllegalArgumentException(s"$context must be a directory path, found file: $trimmed")
@@ -75,5 +81,8 @@ object StartupValidation:
   private def isExplicitHost(raw: String): Boolean =
     val normalized = raw.trim.toLowerCase
     normalized == "localhost" ||
-    Ipv4Address.fromString(normalized).isDefined ||
-    Ipv6Address.fromString(normalized).isDefined
+    (normalized != "0.0.0.0" && Ipv4Address.fromString(normalized).isDefined) ||
+    (normalized != "::" && Ipv6Address.fromString(normalized).isDefined)
+
+  private def containsInvalidPathChar(raw: String): Boolean =
+    raw.exists(_ == '\u0000')

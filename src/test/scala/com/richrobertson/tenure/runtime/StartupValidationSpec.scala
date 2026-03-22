@@ -11,7 +11,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 
 class StartupValidationSpec extends CatsEffectSuite:
-  test("cluster config rejects duplicate peer ids and duplicate local peer entries") {
+  test("cluster config rejects duplicate local peer entries") {
     val config = ClusterConfig(
       nodeId = "node-1",
       apiHost = "127.0.0.1",
@@ -24,28 +24,54 @@ class StartupValidationSpec extends CatsEffectSuite:
     )
 
     val result = StartupValidation.validateConfig(config)
-    assert(result.left.exists(error =>
-      error.getMessage.contains("peer node ids must be unique") ||
-        error.getMessage.contains("expected exactly one peer entry for local node")
-    ))
+    assert(result.left.exists(_.getMessage.contains("expected exactly one peer entry for local node")))
   }
 
-  test("cluster config rejects DNS hostnames and mismatched local api endpoint") {
+  test("cluster config rejects duplicate peer ids") {
     val config = ClusterConfig(
       nodeId = "node-1",
       apiHost = "127.0.0.1",
       apiPort = 9101,
       peers = List(
-        PeerNode("node-1", "tenure.internal", 9001, "127.0.0.1", 9201)
+        PeerNode("node-1", "127.0.0.1", 9001, "127.0.0.1", 9101),
+        PeerNode("node-2", "127.0.0.1", 9002, "127.0.0.1", 9102),
+        PeerNode("node-2", "127.0.0.1", 9003, "127.0.0.1", 9103)
       ),
       dataDir = "/tmp/tenure-startup-validation-b"
     )
 
     val result = StartupValidation.validateConfig(config)
-    assert(result.left.exists(error =>
-      error.getMessage.contains("must be an explicit IP or localhost") ||
-        error.getMessage.contains("must match local peer apiPort")
-    ))
+    assert(result.left.exists(_.getMessage.contains("peer node ids must be unique")))
+  }
+
+  test("cluster config rejects DNS hostnames") {
+    val config = ClusterConfig(
+      nodeId = "node-1",
+      apiHost = "127.0.0.1",
+      apiPort = 9101,
+      peers = List(
+        PeerNode("node-1", "tenure.internal", 9001, "127.0.0.1", 9101)
+      ),
+      dataDir = "/tmp/tenure-startup-validation-c"
+    )
+
+    val result = StartupValidation.validateConfig(config)
+    assert(result.left.exists(_.getMessage.contains("must be an explicit IP or localhost")))
+  }
+
+  test("cluster config rejects mismatched local api endpoint") {
+    val config = ClusterConfig(
+      nodeId = "node-1",
+      apiHost = "127.0.0.1",
+      apiPort = 9101,
+      peers = List(
+        PeerNode("node-1", "127.0.0.1", 9001, "127.0.0.1", 9201)
+      ),
+      dataDir = "/tmp/tenure-startup-validation-d"
+    )
+
+    val result = StartupValidation.validateConfig(config)
+    assert(result.left.exists(_.getMessage.contains("must match local peer apiPort")))
   }
 
   test("cluster config rejects host values with embedded ports") {
@@ -56,7 +82,22 @@ class StartupValidationSpec extends CatsEffectSuite:
       peers = List(
         PeerNode("node-1", "127.0.0.1:9001", 9001, "127.0.0.1", 9101)
       ),
-      dataDir = "/tmp/tenure-startup-validation-d"
+      dataDir = "/tmp/tenure-startup-validation-e"
+    )
+
+    val result = StartupValidation.validateConfig(config)
+    assert(result.left.exists(_.getMessage.contains("must be an explicit IP or localhost")))
+  }
+
+  test("cluster config rejects wildcard peer hosts") {
+    val config = ClusterConfig(
+      nodeId = "node-1",
+      apiHost = "127.0.0.1",
+      apiPort = 9101,
+      peers = List(
+        PeerNode("node-1", "0.0.0.0", 9001, "127.0.0.1", 9101)
+      ),
+      dataDir = "/tmp/tenure-startup-validation-f"
     )
 
     val result = StartupValidation.validateConfig(config)
@@ -71,7 +112,7 @@ class StartupValidationSpec extends CatsEffectSuite:
       peers = List(
         PeerNode("node-1", "127.0.0.1", 9101, "127.0.0.1", 9101)
       ),
-      dataDir = "/tmp/tenure-startup-validation-c"
+      dataDir = "/tmp/tenure-startup-validation-g"
     )
 
     val result = StartupValidation.validateConfig(config)
@@ -83,6 +124,14 @@ class StartupValidationSpec extends CatsEffectSuite:
       StartupValidation.validateDataDir[IO](file.toString, "demo dataDir").attempt.map { result =>
         assert(result.left.exists(_.getMessage.contains("must be a directory path")))
       }
+    }
+  }
+
+  test("data directory validation reports invalid paths with context") {
+    val invalidPath = s"${0.toChar}bad-path"
+    val result = StartupValidation.validateDataDir[IO](invalidPath, "demo dataDir").attempt
+    result.map { outcome =>
+      assert(outcome.left.exists(_.getMessage.contains("demo dataDir must be a valid path")))
     }
   }
 
