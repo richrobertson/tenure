@@ -229,9 +229,11 @@ object LocalEvaluation extends IOApp:
       injector: ControlledFailureInjector[IO],
       reservation: Option[ReservedPeer] = None
   ): Resource[IO, RaftNode[IO]] =
-    Resource.eval(reservation.fold(IO.unit)(reserved => IO.blocking(reserved.close()))).flatMap { _ =>
-      Resource.eval(RaftPersistence.fileBacked[IO](dataDir, config.nodeId, injector, observability)).flatMap(persistence => RaftNode.resource[IO](config, persistence, observability = observability))
-    }
+    for
+      persistence <- Resource.eval(RaftPersistence.fileBacked[IO](dataDir, config.nodeId, injector, observability))
+      _ <- Resource.eval(reservation.fold(IO.unit)(reserved => IO.blocking(reserved.close())))
+      node <- RaftNode.resource[IO](config, persistence, observability = observability)
+    yield node
 
   private def allocateNode(
       config: ClusterConfig,
