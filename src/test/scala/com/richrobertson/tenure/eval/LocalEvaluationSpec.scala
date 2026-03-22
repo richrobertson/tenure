@@ -65,3 +65,11 @@ class LocalEvaluationSpec extends CatsEffectSuite:
       }
     }
   }
+
+  test("execution failures return ExitCode.Error instead of raising") {
+    IO.blocking(Files.createTempFile("tenure-eval-workdir-file", ".tmp")).flatMap { file =>
+      LocalEvaluation.run(List("demo", "--work-dir", file.toString)).map { exitCode =>
+        assertEquals(exitCode, ExitCode.Error)
+      }
+    }
+  }

@@ -35,7 +35,7 @@ object StartupValidation:
         throw new IllegalArgumentException(s"$context must be writable: $trimmed")
 
       path
-    }.adaptError { case error: IllegalArgumentException => error }
+    }
 
   def validateConfig(config: ClusterConfig): Either[IllegalArgumentException, ClusterConfig] =
     for

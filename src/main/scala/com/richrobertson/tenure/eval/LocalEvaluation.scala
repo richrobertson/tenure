@@ -34,6 +34,11 @@ object LocalEvaluation extends IOApp:
               writeOutput(path, result.json).as(if result.success then ExitCode.Success else ExitCode.Error)
             case None =>
               IO.println(result.json).as(if result.success then ExitCode.Success else ExitCode.Error)
+        }.handleErrorWith { error =>
+          val message = Option(error.getMessage).filter(_.nonEmpty) match
+            case Some(detail) => s"${error.getClass.getSimpleName}: $detail"
+            case None         => error.getClass.getSimpleName
+          IO.println(s"evaluation failed: $message").as(ExitCode.Error)
         }
     )
 
