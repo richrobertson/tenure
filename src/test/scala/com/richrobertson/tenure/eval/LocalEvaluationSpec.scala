@@ -6,9 +6,10 @@ import cats.syntax.all.*
 import munit.CatsEffectSuite
 
 import java.nio.file.Files
+import scala.concurrent.duration.*
 
 class LocalEvaluationSpec extends CatsEffectSuite:
-  override val munitTimeout = scala.concurrent.duration.DurationInt(90).seconds
+  override val munitTimeout = 90.seconds
 
   test("demo report includes the required milestone 8 scenarios") {
     LocalEvaluation.runDemo().map { report =>
