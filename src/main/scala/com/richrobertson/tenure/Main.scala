@@ -8,6 +8,7 @@ import com.richrobertson.tenure.group.{GroupId, GroupRuntime}
 import com.richrobertson.tenure.observability.{Observability, ObservabilityRoutes}
 import com.richrobertson.tenure.persistence.RaftPersistence
 import com.richrobertson.tenure.raft.{ClusterConfig, RaftNode}
+import com.richrobertson.tenure.runtime.StartupValidation
 import com.richrobertson.tenure.routing.HashRouter
 import com.richrobertson.tenure.service.LeaseService
 import com.richrobertson.tenure.service.ServiceCodecs.given
@@ -50,13 +51,13 @@ object Main extends IOApp:
         .default[IO]
         .withHost(host)
         .withPort(port)
-        .withHttpApp(httpApp(service, observability.snapshot, debugEnabled = true))
+        .withHttpApp(httpApp(service, observability.snapshot, debugEnabled = isLoopback(localApiHost)))
         .build
     yield ()
 
   private def runClustered(configPath: String): IO[Unit] =
     for
-      config <- loadConfig(configPath)
+      config <- loadConfig(configPath).flatMap(StartupValidation.validateClusteredConfig[IO])
       _ <- appResource(config).use(_ => IO.never)
     yield ()
 

@@ -56,7 +56,7 @@ Milestone 2 is complete. The repo now contains a single-group Raft integration p
 
 Milestone 5 is now complete. The repo now contains explicit local-disk recovery state for Raft term/vote/commit progress, durable state-machine snapshots, deterministic restart + replay bootstrapping, and snapshot-driven log compaction validated by automated recovery tests and a local demo transcript.
 
-Milestone 7 is now complete. The request path includes an explicit routing layer, deterministic `(tenant_id, resource_id) -> group_id` placement, and a logical `GroupRuntime` boundary so single-group mode remains the default while local multi-group simulation is now possible without changing the client-facing API.
+Milestone 8 is now complete. The repo now includes startup/config hardening for the clustered daemon path, a repeatable local evaluation harness for demo and benchmark scenarios, and a reviewer-friendly runbook for validating v1 behavior and limits without hidden setup.
 
 ## Project documents
 
@@ -76,6 +76,7 @@ Milestone 7 is now complete. The request path includes an explicit routing layer
 - [Milestone 5 persistence/recovery demo](docs/demo/milestone-5.md)
 - [Milestone 6 observability/failure-injection demo](docs/demo/milestone-6.md)
 - [Milestone 7 routing/multi-group demo](docs/demo/milestone-7.md)
+- [Milestone 8 hardening/benchmark demo](docs/demo/milestone-8.md)
 
 ## Why leases are different from simple distributed locks
 
@@ -87,7 +88,7 @@ Tenure is intentionally scoped at the point where distributed-systems correctnes
 
 ## Future work
 
-Milestone 7 is now complete. The repo now includes deterministic placement and local multi-group simulation, but it still does not implement live rebalancing, shard migration, cross-node multi-group leadership coordination, or an external placement/control plane.
+Milestone 8 is now complete. The repo now has a credible local evaluation path and tighter startup validation, but it still does not implement live rebalancing, shard migration, cross-node multi-group leadership coordination, production deployment automation, or a broader production-readiness program.
 
 ## Local prototype
 
@@ -99,6 +100,20 @@ The current prototype intentionally stays narrow: single-group operation remains
 
 ```bash
 sbt test
+```
+
+### Run the Milestone 8 evaluator
+
+Repeatable demo report:
+
+```bash
+sbt "runMain com.richrobertson.tenure.eval.LocalEvaluation demo --output /tmp/tenure-m8-demo-report.json"
+```
+
+Repeatable benchmark report:
+
+```bash
+sbt "runMain com.richrobertson.tenure.eval.LocalEvaluation benchmark --iterations 20 --parallelism 4 --output /tmp/tenure-m8-benchmark.json"
 ```
 
 ### Run the prototype
@@ -136,3 +151,4 @@ sbt "run -- node-3.json"
 ```
 
 See `docs/demo/milestone-2.md` for a static-config example and demo flow.
+See `docs/demo/milestone-8.md` for the hardened startup checks, evaluator commands, and manual local review flow.

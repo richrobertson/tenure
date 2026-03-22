@@ -37,9 +37,9 @@ object RaftPersistence:
       failureInjector: FailureInjector[F],
       observability: Observability[F]
   )(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]): F[RaftPersistence[F]] =
-    Sync[F].delay {
+    Sync[F].blocking {
       val root = Paths.get(dataDir)
-      Files.createDirectories(root)
+      PersistenceLayout.prepare(root, nodeId)
       new FileBackedRaftPersistence[F](root, nodeId, failureInjector, observability)
     }
 
@@ -85,7 +85,7 @@ private final class FileBackedRaftPersistence[F[_]: Sync](root: Path, nodeId: St
 
   private def ensureFiles: F[Unit] =
     Sync[F].blocking {
-      Files.createDirectories(root)
+      PersistenceLayout.prepare(root, nodeId)
       if !Files.exists(metadataPath) then Files.writeString(metadataPath, PersistedMetadata.initial.asJson.spaces2, StandardCharsets.UTF_8)
       if !Files.exists(logPath) then Files.writeString(logPath, "", StandardCharsets.UTF_8)
       if !Files.exists(snapshotPath) then Files.writeString(snapshotPath, "", StandardCharsets.UTF_8)
@@ -115,3 +115,42 @@ private final class FileBackedRaftPersistence[F[_]: Sync](root: Path, nodeId: St
     }
 
   private def delay(point: FailurePoint): F[Unit] = failureInjector.inject(point, nodeId)
+
+private object PersistenceLayout:
+  private val markerFileName = "node-id"
+  private val managedFiles = List("metadata.json", "log.jsonl", "snapshot.json", markerFileName)
+
+  def prepare(root: Path, nodeId: String): Unit =
+    val trimmedNodeId = nodeId.trim
+    if trimmedNodeId.isEmpty then
+      throw new IllegalArgumentException("nodeId must be non-empty before preparing persistence")
+    if nodeId != trimmedNodeId then
+      throw new IllegalArgumentException("nodeId must not contain leading or trailing whitespace before preparing persistence")
+
+    if Files.exists(root) && !Files.isDirectory(root) then
+      throw new IllegalArgumentException(s"data directory must be a directory path, found file: $root")
+
+    Files.createDirectories(root)
+
+    if !Files.isWritable(root) then
+      throw new IllegalArgumentException(s"data directory must be writable: $root")
+
+    managedFiles.foreach { fileName =>
+      val path = root.resolve(fileName)
+      if Files.exists(path) && Files.isDirectory(path) then
+        throw new IllegalArgumentException(s"persisted path must be a file, found directory: $path")
+    }
+
+    val markerPath = root.resolve(markerFileName)
+    if Files.exists(markerPath) then
+      val storedNodeId = Files.readString(markerPath, StandardCharsets.UTF_8).trim
+      if storedNodeId.isEmpty then
+        throw new IllegalArgumentException(
+          s"data directory $root has an empty '$markerFileName' marker; please fix or remove the directory before reuse"
+        )
+      else if storedNodeId != trimmedNodeId then
+        throw new IllegalArgumentException(
+          s"data directory $root belongs to node '$storedNodeId', not '$trimmedNodeId'"
+        )
+    else
+      Files.writeString(markerPath, trimmedNodeId + "\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW)

@@ -93,11 +93,21 @@ private final case class RoutedLeaseService[F[_]: Async](
       err => observeEarlyResult("list", None, Left(err).map(_ => ())).as(err.asLeft[ListLeasesResult]),
       tenantId =>
         observeBroadcast("list", tenantId) *>
-          orderedGroupIds.traverse(groupId => runtime(groupId).service.listLeases(request)).map { results =>
-            results.collectFirst { case Left(error) => Left(error) }.getOrElse {
-              Right(ListLeasesResult(results.collect { case Right(result) => result.leases }.flatten.toList.sortBy(_.resourceId.value)))
+          orderedGroupIds
+            .foldLeftM(Right(Vector.empty): Either[ServiceError, Vector[com.richrobertson.tenure.model.LeaseView]]) {
+              case (left @ Left(_), _) => left.pure[F]
+              case (Right(accumulated), groupId) =>
+                runtime(groupId).service.listLeases(request).map {
+                  case Left(error)   => Left(error)
+                  case Right(result) => Right(accumulated ++ result.leases)
+                }
             }
-          }
+            .map {
+              case Left(error) =>
+                Left(error)
+              case Right(leases) =>
+                Right(ListLeasesResult(leases.toList.sortBy(_.resourceId.value)))
+            }
     )
 
   private def runtime(groupId: GroupId): GroupRuntime[F] =

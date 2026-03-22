@@ -7,3 +7,4 @@
 - [Request-flow diagrams](diagrams/request-flow.md)
 - [Terminology](terminology.md)
 - [Milestone 7 routing/multi-group demo](demo/milestone-7.md)
+- [Milestone 8 hardening/benchmark demo](demo/milestone-8.md)
