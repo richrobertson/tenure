@@ -6,3 +6,4 @@
 - [ADR: v1 single Raft group and logical multitenancy](adr/0001-v1-single-raft-group-logical-multitenancy.md)
 - [Request-flow diagrams](diagrams/request-flow.md)
 - [Terminology](terminology.md)
+- [Milestone 7 routing/multi-group demo](demo/milestone-7.md)

@@ -83,6 +83,24 @@ object Observability:
   def inMemory[F[_]: Sync]: F[InMemoryObservability[F]] =
     Ref.of[F, InMemoryObservability.State](InMemoryObservability.State.empty).map(new InMemoryObservability[F](_))
 
+  def scoped[F[_]](
+      underlying: Observability[F],
+      metricLabels: Map[String, String] = Map.empty,
+      eventFields: Map[String, String] = Map.empty
+  ): Observability[F] =
+    new Observability[F]:
+      override def incrementCounter(name: String, labels: Map[String, String], delta: Long): F[Unit] =
+        underlying.incrementCounter(name, metricLabels ++ labels, delta)
+
+      override def setGauge(name: String, value: Long, labels: Map[String, String]): F[Unit] =
+        underlying.setGauge(name, value, metricLabels ++ labels)
+
+      override def recordTiming(name: String, millis: Long, labels: Map[String, String]): F[Unit] =
+        underlying.recordTiming(name, millis, metricLabels ++ labels)
+
+      override def log(event: LogEvent): F[Unit] =
+        underlying.log(event.copy(fields = eventFields ++ event.fields))
+
 object InMemoryObservability:
   private[observability] final case class State(
       counters: Map[MetricKey, Long],

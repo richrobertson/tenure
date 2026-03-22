@@ -74,14 +74,16 @@ Milestone 6 is complete. The repo now exposes a small in-process observability s
 - **Demo/test expectation:** Repeatable scenarios show leader loss, retry storms, and delayed disk behavior with observable recovery and bounded unavailability.
 - **Done means:** Operators can detect correctness-relevant events and correlate them with failure tests using defined signals.
 
-## Milestone 7: sharding-ready routing abstraction
+## Milestone 7: routing, multi-group readiness, and horizontal scale foundations *(complete)*
+
+Milestone 7 is complete. The repo now contains an explicit routing layer, a `GroupId` / `GroupRuntime` boundary, deterministic hash-based placement from `(tenant_id, resource_id)` to logical group ID, a routed service path that preserves the existing client-facing lease API, and local multi-group simulation support. Single-group mode remains the default, but the request path is now explicitly `API -> Router -> GroupRuntime`.
 
 - **Objective:** Introduce routing and placement seams without changing client semantics.
-- **Deliverables:** Internal `placement(tenant_id, resource_id) -> raft_group_id` abstraction, routing layer, and shard-compatible list semantics.
+- **Deliverables:** Internal `placement(tenant_id, resource_id) -> raft_group_id` abstraction, routing layer, explicit group runtime boundary, deterministic placement, and shard-compatible list semantics.
 - **Out of scope:** Live online rebalancing across many groups.
-- **Validation artifact:** Routing contract doc and request-flow demo through the placement API.
-- **Demo/test expectation:** Demonstrate that the service resolves placement before reads and writes while still targeting one shared group in v1, and that client/peer correctness does not depend on Kubernetes, DNS, or external service discovery.
-- **Done means:** Routing and placement are explicit implementation seams, the client contract still matches the single-group behavior, and the v1 transport path remains simple TCP without multiplexing.
+- **Validation artifact:** Routing contract doc, deterministic routing specs, local multi-group simulation tests, and per-group recovery validation.
+- **Demo/test expectation:** Demonstrate that the service resolves placement before reads and writes, can simulate multiple groups locally, keeps API behavior stable, and still relies only on local config, TCP transport, and local process state.
+- **Done means:** Routing and placement are explicit implementation seams, deterministic local multi-group execution is test-covered, per-group recovery works, and the v1 transport path remains simple TCP without multiplexing.
 
 ## Milestone 8: hardening and benchmark/demo suite
 

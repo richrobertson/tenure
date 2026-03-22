@@ -1,11 +1,14 @@
 package com.richrobertson.tenure
 
 import cats.effect.{ExitCode, IO, IOApp, Resource}
+import cats.syntax.all.*
 import cats.syntax.semigroupk.*
 import com.richrobertson.tenure.api.LeaseRoutes
+import com.richrobertson.tenure.group.{GroupId, GroupRuntime}
 import com.richrobertson.tenure.observability.{Observability, ObservabilityRoutes}
 import com.richrobertson.tenure.persistence.RaftPersistence
 import com.richrobertson.tenure.raft.{ClusterConfig, RaftNode}
+import com.richrobertson.tenure.routing.HashRouter
 import com.richrobertson.tenure.service.LeaseService
 import com.richrobertson.tenure.service.ServiceCodecs.given
 import com.richrobertson.tenure.time.Clock
@@ -23,26 +26,31 @@ object Main extends IOApp:
 
   override def run(args: List[String]): IO[ExitCode] =
     args match
-      case Nil               => runLocal.as(ExitCode.Success)
+      case Nil                              => runLocal(1).as(ExitCode.Success)
+      case "--local-groups" :: count :: Nil => parseLocalGroupCount(count).flatMap(runLocal).as(ExitCode.Success)
       case configPath :: Nil => runClustered(configPath).as(ExitCode.Success)
-      case _                 => IO.println("usage: sbt run            # single-node local prototype\n   or: sbt \"run -- <config-path>\"  # clustered mode").as(ExitCode.Error)
+      case _ => IO.println("usage: sbt run                          # single-group local prototype\n   or: sbt \"run -- --local-groups <n>\"  # local multi-group simulation\n   or: sbt \"run -- <config-path>\"       # clustered single-group mode").as(ExitCode.Error)
 
-  private def runLocal: IO[Unit] =
+  private def runLocal(groupCount: Int): IO[Unit] =
     for
-      _ <- IO.println(s"starting single-node prototype on $localApiHost:$localApiPort")
-      _ <- localAppResource.use(_ => IO.never)
+      _ <- IO.println(s"starting local prototype with $groupCount logical group(s) on $localApiHost:$localApiPort")
+      _ <- localAppResource(groupCount).use(_ => IO.never)
     yield ()
 
-  private def localAppResource: Resource[IO, Unit] =
+  private def localAppResource(groupCount: Int): Resource[IO, Unit] =
     for
-      service <- Resource.eval(LeaseService.inMemory[IO](Clock.system[IO]))
+      observability <- Resource.eval(Observability.inMemory[IO])
+      groupIds = (1 to groupCount).toVector.map(idx => GroupId(s"group-$idx"))
+      groups <- Resource.eval(groupIds.toList.traverse(groupId => GroupRuntime.inMemory[IO](groupId, Clock.system[IO], observability = observability)))
+      router = HashRouter(groupIds)
+      service = LeaseService.routed[IO](router, groups, Clock.system[IO], observability = observability)
       host <- Resource.eval(parseHost(localApiHost, context = "single-node API host"))
       port <- Resource.eval(parsePort(localApiPort, context = "single-node API port"))
       _ <- EmberServerBuilder
         .default[IO]
         .withHost(host)
         .withPort(port)
-        .withHttpApp(LeaseRoutes.routes[IO](service).orNotFound)
+        .withHttpApp(httpApp(service, observability.snapshot, isLoopback(localApiHost)))
         .build
     yield ()
 
@@ -55,23 +63,34 @@ object Main extends IOApp:
   private def appResource(config: ClusterConfig): Resource[IO, Unit] =
     for
       observability <- Resource.eval(Observability.inMemory[IO])
-      persistence <- Resource.eval(RaftPersistence.fileBacked[IO](config.dataDir, config.nodeId, observability = observability))
-      raftNode <- RaftNode.resource[IO](config, persistence, observability = observability)
-      service = LeaseService.replicated[IO](raftNode, Clock.system[IO], observability = observability)
+      groupObservability = Observability.scoped(observability, Map("group_id" -> GroupId.Default.value), Map("group_id" -> GroupId.Default.value))
+      persistence <- Resource.eval(RaftPersistence.fileBacked[IO](config.dataDir, config.nodeId, groupObservability))
+      raftNode <- RaftNode.resource[IO](config, persistence, observability = groupObservability)
+      group = GroupRuntime.replicated[IO](GroupId.Default, raftNode, Clock.system[IO], groupObservability)
+      service = LeaseService.routed[IO](HashRouter(Vector(GroupId.Default)), List(group), Clock.system[IO], observability = observability)
       host <- Resource.eval(parseHost(config.apiHost, context = s"cluster API host for node ${config.nodeId}", fallback = Some("127.0.0.1")))
       port <- Resource.eval(parsePort(config.apiPort, context = s"cluster API port for node ${config.nodeId}"))
       _ <- EmberServerBuilder
         .default[IO]
         .withHost(host)
         .withPort(port)
-        .withHttpApp(httpApp(config, service, observability.snapshot))
+        .withHttpApp(httpApp(service, observability.snapshot, isLoopback(config.apiHost)))
         .build
     yield ()
 
-  private def httpApp(config: ClusterConfig, service: LeaseService[IO], snapshot: IO[com.richrobertson.tenure.observability.ObservabilitySnapshot]): HttpApp[IO] =
+  private def httpApp(
+      service: LeaseService[IO],
+      snapshot: IO[com.richrobertson.tenure.observability.ObservabilitySnapshot],
+      debugEnabled: Boolean
+  ): HttpApp[IO] =
     val baseRoutes = LeaseRoutes.routes[IO](service)
-    val debugRoutes = if isLoopback(config.apiHost) then ObservabilityRoutes.routes[IO](snapshot) else org.http4s.HttpRoutes.empty[IO]
+    val debugRoutes = if debugEnabled then ObservabilityRoutes.routes[IO](snapshot) else org.http4s.HttpRoutes.empty[IO]
     (baseRoutes <+> debugRoutes).orNotFound
+
+  private def parseLocalGroupCount(raw: String): IO[Int] =
+    IO
+      .fromEither(Either.catchNonFatal(raw.toInt).leftMap(_ => new IllegalArgumentException(s"invalid local group count: '$raw'")))
+      .flatMap(count => IO.raiseUnless(count > 0)(new IllegalArgumentException("local group count must be positive")).as(count))
 
   private def isLoopback(host: String): Boolean =
     val normalized = host.trim.toLowerCase
