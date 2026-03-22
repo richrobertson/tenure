@@ -205,9 +205,20 @@ curl -s http://127.0.0.1:9501/v1/leases/acquire \
   -d '{"tenant_id":"demo-tenant","resource_id":"resource-fence","holder_id":"holder-old","ttl_seconds":10,"request_id":"demo-fence-1"}'
 ```
 
-Release that lease, then reacquire:
+Expected outcome:
+
+- HTTP `200`
+- response includes the first `lease_id` and `fencing_token`
+
+Release that lease using the returned `lease_id`, then reacquire:
 
 ```bash
+curl -s http://127.0.0.1:9501/v1/leases/release \
+  -H 'Content-Type: application/json' \
+  -H 'X-Tenure-Principal-Id: demo-user' \
+  -H 'X-Tenure-Principal-Tenant: demo-tenant' \
+  -d '{"tenant_id":"demo-tenant","resource_id":"resource-fence","lease_id":"<first-lease-id>","holder_id":"holder-old","request_id":"demo-fence-release-1"}'
+
 curl -s http://127.0.0.1:9501/v1/leases/acquire \
   -H 'Content-Type: application/json' \
   -H 'X-Tenure-Principal-Id: demo-user' \
@@ -217,6 +228,7 @@ curl -s http://127.0.0.1:9501/v1/leases/acquire \
 
 Expected outcome:
 
+- the release returns HTTP `200` with `released=true`
 - the second acquire succeeds
 - the second `fencing_token` is greater than the first one
 - this is the local proof that stale writers can be rejected downstream
