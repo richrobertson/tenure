@@ -43,7 +43,7 @@ object Main extends IOApp:
       groupIds = (1 to groupCount).toVector.map(idx => GroupId(s"group-$idx"))
       groups <- Resource.eval(groupIds.toList.traverse(groupId => GroupRuntime.inMemory[IO](groupId, Clock.system[IO], observability = observability)))
       router = HashRouter(groupIds)
-      service = LeaseService.routed[IO](router, groups, Clock.system[IO], observability = observability)
+      service <- Resource.eval(LeaseService.routed[IO](router, groups, Clock.system[IO], observability = observability))
       host <- Resource.eval(parseHost(localApiHost, context = "single-node API host"))
       port <- Resource.eval(parsePort(localApiPort, context = "single-node API port"))
       _ <- EmberServerBuilder
@@ -67,7 +67,7 @@ object Main extends IOApp:
       persistence <- Resource.eval(RaftPersistence.fileBacked[IO](config.dataDir, config.nodeId, groupObservability))
       raftNode <- RaftNode.resource[IO](config, persistence, observability = groupObservability)
       group = GroupRuntime.replicated[IO](GroupId.Default, raftNode, Clock.system[IO], groupObservability)
-      service = LeaseService.routed[IO](HashRouter(Vector(GroupId.Default)), List(group), Clock.system[IO], observability = observability)
+      service <- Resource.eval(LeaseService.routed[IO](HashRouter(Vector(GroupId.Default)), List(group), Clock.system[IO], observability = observability))
       host <- Resource.eval(parseHost(config.apiHost, context = s"cluster API host for node ${config.nodeId}", fallback = Some("127.0.0.1")))
       port <- Resource.eval(parsePort(config.apiPort, context = s"cluster API port for node ${config.nodeId}"))
       _ <- EmberServerBuilder

@@ -39,17 +39,19 @@ class MultiGroupRecoverySpec extends CatsEffectSuite:
             _ = assert(acquiredA.isRight)
             _ = assert(acquiredB.isRight)
           yield ()
-        } *> withRoutedReplicatedService(root, observability).use { restarted =>
-          for
-            _ <- restarted.nodes.traverse_(awaitLeader)
-            leaseA <- restarted.service.getLease(GetLeaseRequest(principal, tenantId.value, resourceA.value))
-            leaseB <- restarted.service.getLease(GetLeaseRequest(principal, tenantId.value, resourceB.value))
-            snapshot <- observability.snapshot
-          yield
-            assertEquals(leaseA.toOption.map(_.lease.holderId.map(_.value)), Some(Some("holder-a")))
-            assertEquals(leaseB.toOption.map(_.lease.holderId.map(_.value)), Some(Some("holder-b")))
-            assert(snapshot.counters.exists(sample => sample.metric.name == "recovery_events_total" && sample.metric.labels.get("group_id").contains("group-1")))
-            assert(snapshot.counters.exists(sample => sample.metric.name == "recovery_events_total" && sample.metric.labels.get("group_id").contains("group-2")))
+        } *> observability.snapshot.flatMap { baseline =>
+          withRoutedReplicatedService(root, observability).use { restarted =>
+            for
+              _ <- restarted.nodes.traverse_(awaitLeader)
+              leaseA <- restarted.service.getLease(GetLeaseRequest(principal, tenantId.value, resourceA.value))
+              leaseB <- restarted.service.getLease(GetLeaseRequest(principal, tenantId.value, resourceB.value))
+              snapshot <- observability.snapshot
+            yield
+              assertEquals(leaseA.toOption.map(_.lease.holderId.map(_.value)), Some(Some("holder-a")))
+              assertEquals(leaseB.toOption.map(_.lease.holderId.map(_.value)), Some(Some("holder-b")))
+              assert(recoveryCount(snapshot, GroupId("group-1")) > recoveryCount(baseline, GroupId("group-1")))
+              assert(recoveryCount(snapshot, GroupId("group-2")) > recoveryCount(baseline, GroupId("group-2")))
+          }
         }
       }
     }
@@ -60,9 +62,9 @@ class MultiGroupRecoverySpec extends CatsEffectSuite:
   private def withRoutedReplicatedService(root: java.nio.file.Path, observability: com.richrobertson.tenure.observability.InMemoryObservability[IO]): Resource[IO, RunningService] =
     groupIds.toList
       .traverse(groupId => singleNodeGroup(root.resolve(groupId.value).toString, groupId, observability))
-      .map { groups =>
+      .evalMap { groups =>
         val router = HashRouter(groupIds)
-        RunningService(LeaseService.routed[IO](router, groups.map(_.runtime), Clock.system[IO], observability), groups.map(_.node))
+        LeaseService.routed[IO](router, groups.map(_.runtime), Clock.system[IO], observability).map(service => RunningService(service, groups.map(_.node)))
       }
 
   private final case class RunningGroup(runtime: GroupRuntime[IO], node: RaftNode[IO])
@@ -100,6 +102,13 @@ class MultiGroupRecoverySpec extends CatsEffectSuite:
     val socket = new ServerSocket(0)
     try socket.getLocalPort
     finally socket.close()
+
+  private def recoveryCount(snapshot: com.richrobertson.tenure.observability.ObservabilitySnapshot, groupId: GroupId): Long =
+    snapshot.counters
+      .collectFirst {
+        case sample if sample.metric.name == "recovery_events_total" && sample.metric.labels.get("group_id").contains(groupId.value) => sample.value
+      }
+      .getOrElse(0L)
 
   private def eventually[A](label: String, timeout: FiniteDuration = 12.seconds, interval: FiniteDuration = 200.millis)(thunk: IO[A]): IO[A] =
     IO.monotonic.flatMap { start =>

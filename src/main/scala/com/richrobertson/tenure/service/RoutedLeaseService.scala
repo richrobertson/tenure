@@ -1,6 +1,7 @@
 package com.richrobertson.tenure.service
 
 import cats.effect.kernel.Async
+import cats.effect.std.Mutex
 import cats.syntax.all.*
 import com.richrobertson.tenure.auth.Authorization
 import com.richrobertson.tenure.group.{GroupId, GroupRuntime}
@@ -16,7 +17,8 @@ private final case class RoutedLeaseService[F[_]: Async](
     clock: Clock[F],
     quotas: TenantQuotaRegistry,
     authorization: Authorization,
-    observability: Observability[F]
+    observability: Observability[F],
+    admissionLock: Mutex[F]
 ) extends LeaseService[F]
     with ValidationSupport:
   private val orderedGroupIds = router.groups.distinct
@@ -27,17 +29,22 @@ private final case class RoutedLeaseService[F[_]: Async](
     validateAcquire(request, authorization).fold(
       err => err.asLeft[AcquireResult].pure[F],
       valid =>
-        for
-          decision <- route(valid.resourceKey, "acquire")
-          duplicate <- duplicateAcquire(valid.requestContext, valid.fingerprint)
-          result <- duplicate match
-            case Some(existing) => existing.pure[F]
-            case None =>
-              validateGlobalActiveLeaseQuota(valid.requestContext.tenantId).flatMap {
-                case Some(error) => error.asLeft[AcquireResult].pure[F]
-                case None        => runtime(decision.groupId).service.acquire(request)
-              }
-        yield result
+        route(valid.resourceKey, "acquire").flatMap { decision =>
+          // Routed acquires need one admission critical section so tenant-global request IDs
+          // and active-lease quotas remain correct across groups.
+          admissionLock.lock.surround {
+            for
+              duplicate <- duplicateAcquire(valid.requestContext, valid.fingerprint)
+              result <- duplicate match
+                case Some(existing) => existing.pure[F]
+                case None =>
+                  validateGlobalActiveLeaseQuota(valid.requestContext.tenantId).flatMap {
+                    case Some(error) => error.asLeft[AcquireResult].pure[F]
+                    case None        => runtime(decision.groupId).service.acquire(request)
+                  }
+            yield result
+          }
+        }
     )
 
   override def renew(request: RenewRequest): F[Either[ServiceError, RenewResult]] =

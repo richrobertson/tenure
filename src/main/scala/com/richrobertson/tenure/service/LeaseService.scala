@@ -250,10 +250,10 @@ object LeaseService:
   ): LeaseServiceRuntime[F] =
     LeaseServiceRuntime(ReplicatedLeaseService[F](raftNode, clock, quotas, authorization, observability), raftNode.readState)
 
-  def routed[F[_]: Async](router: Router, groups: List[GroupRuntime[F]], clock: Clock[F]): LeaseService[F] =
+  def routed[F[_]: Async](router: Router, groups: List[GroupRuntime[F]], clock: Clock[F]): F[LeaseService[F]] =
     routed(router, groups, clock, TenantQuotaRegistry.default, Authorization.perTenant, Observability.noop[F])
 
-  def routed[F[_]: Async](router: Router, groups: List[GroupRuntime[F]], clock: Clock[F], observability: Observability[F]): LeaseService[F] =
+  def routed[F[_]: Async](router: Router, groups: List[GroupRuntime[F]], clock: Clock[F], observability: Observability[F]): F[LeaseService[F]] =
     routed(router, groups, clock, TenantQuotaRegistry.default, Authorization.perTenant, observability)
 
   def routed[F[_]: Async](
@@ -263,8 +263,10 @@ object LeaseService:
       quotas: TenantQuotaRegistry,
       authorization: Authorization,
       observability: Observability[F]
-  ): LeaseService[F] =
-    RoutedLeaseService(router, groups.map(group => group.groupId -> group).toMap, clock, quotas, authorization, observability)
+  ): F[LeaseService[F]] =
+    Mutex[F].map { admissionLock =>
+      RoutedLeaseService(router, groups.map(group => group.groupId -> group).toMap, clock, quotas, authorization, observability, admissionLock)
+    }
 
 private[service] trait ValidationSupport:
   final case class ValidAcquire(resourceKey: ResourceKey, holderId: ClientId, ttlSeconds: Long, requestContext: RequestContext, fingerprint: RequestFingerprint)

@@ -90,16 +90,16 @@ object Observability:
   ): Observability[F] =
     new Observability[F]:
       override def incrementCounter(name: String, labels: Map[String, String], delta: Long): F[Unit] =
-        underlying.incrementCounter(name, metricLabels ++ labels, delta)
+        underlying.incrementCounter(name, labels ++ metricLabels, delta)
 
       override def setGauge(name: String, value: Long, labels: Map[String, String]): F[Unit] =
-        underlying.setGauge(name, value, metricLabels ++ labels)
+        underlying.setGauge(name, value, labels ++ metricLabels)
 
       override def recordTiming(name: String, millis: Long, labels: Map[String, String]): F[Unit] =
-        underlying.recordTiming(name, millis, metricLabels ++ labels)
+        underlying.recordTiming(name, millis, labels ++ metricLabels)
 
       override def log(event: LogEvent): F[Unit] =
-        underlying.log(event.copy(fields = eventFields ++ event.fields))
+        underlying.log(event.copy(fields = event.fields ++ eventFields))
 
 object InMemoryObservability:
   private[observability] final case class State(
