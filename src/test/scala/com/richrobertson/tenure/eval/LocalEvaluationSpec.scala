@@ -36,3 +36,13 @@ class LocalEvaluationSpec extends CatsEffectSuite:
       assert(report.knownLimits.nonEmpty)
     }
   }
+
+  test("demo parsing rejects benchmark-only flags") {
+    val result = LocalEvaluation.parseArgs(List("demo", "--iterations", "5"))
+    assert(result.left.exists(_.contains("unknown option(s) for demo: iterations")))
+  }
+
+  test("argument parsing reports missing option values explicitly") {
+    val result = LocalEvaluation.parseArgs(List("benchmark", "--work-dir"))
+    assert(result.left.exists(_.contains("--work-dir requires a value")))
+  }

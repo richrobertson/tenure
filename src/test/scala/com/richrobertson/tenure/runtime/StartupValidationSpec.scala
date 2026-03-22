@@ -48,6 +48,21 @@ class StartupValidationSpec extends CatsEffectSuite:
     ))
   }
 
+  test("cluster config rejects host values with embedded ports") {
+    val config = ClusterConfig(
+      nodeId = "node-1",
+      apiHost = "127.0.0.1",
+      apiPort = 9101,
+      peers = List(
+        PeerNode("node-1", "127.0.0.1:9001", 9001, "127.0.0.1", 9101)
+      ),
+      dataDir = "/tmp/tenure-startup-validation-d"
+    )
+
+    val result = StartupValidation.validateConfig(config)
+    assert(result.left.exists(_.getMessage.contains("must be an explicit IP or localhost")))
+  }
+
   test("cluster config rejects multiplexed raft and api ports") {
     val config = ClusterConfig(
       nodeId = "node-1",

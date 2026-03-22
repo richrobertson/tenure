@@ -328,7 +328,7 @@ object LocalEvaluation extends IOApp:
       "Failure scenarios stay local-first: static config, local disk, and direct TCP peer endpoints only."
     )
 
-  private def parseArgs(args: List[String]): Either[String, Command] =
+  private[eval] def parseArgs(args: List[String]): Either[String, Command] =
     args match
       case "demo" :: tail      => parseDemo(tail)
       case "benchmark" :: tail => parseBenchmark(tail)
@@ -339,7 +339,12 @@ object LocalEvaluation extends IOApp:
         )
 
   private def parseDemo(args: List[String]): Either[String, DemoCommand] =
-    parseCommon(args).map { case (workDir, output, _) => DemoCommand(workDir = workDir, output = output) }
+    parseCommon(args).flatMap { case (workDir, output, extras) =>
+      if extras.nonEmpty then
+        Left(s"unknown option(s) for demo: ${extras.keys.toList.sorted.mkString(", ")}")
+      else
+        Right(DemoCommand(workDir = workDir, output = output))
+    }
 
   private def parseBenchmark(args: List[String]): Either[String, BenchmarkCommand] =
     parseCommon(args).flatMap { case (workDir, output, extras) =>
@@ -353,6 +358,10 @@ object LocalEvaluation extends IOApp:
     def loop(remaining: List[String], workDir: Option[Path], output: Option[Path], extras: Map[String, String]): Either[String, (Option[Path], Option[Path], Map[String, String])] =
       remaining match
         case Nil => Right((workDir, output, extras))
+        case "--work-dir" :: Nil => Left("--work-dir requires a value")
+        case "--output" :: Nil => Left("--output requires a value")
+        case "--iterations" :: Nil => Left("--iterations requires a value")
+        case "--parallelism" :: Nil => Left("--parallelism requires a value")
         case "--work-dir" :: value :: tail => loop(tail, Some(Path.of(value)), output, extras)
         case "--output" :: value :: tail   => loop(tail, workDir, Some(Path.of(value)), extras)
         case "--iterations" :: value :: tail => loop(tail, workDir, output, extras.updated("iterations", value))

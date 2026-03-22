@@ -2,14 +2,12 @@ package com.richrobertson.tenure.runtime
 
 import cats.effect.kernel.Sync
 import cats.syntax.all.*
+import com.comcast.ip4s.{Ipv4Address, Ipv6Address}
 import com.richrobertson.tenure.raft.{ClusterConfig, PeerNode}
 
 import java.nio.file.{Files, Path, Paths}
-import scala.util.matching.Regex
 
 object StartupValidation:
-  private val ipv4Pattern: Regex = raw"\d{1,3}(\.\d{1,3}){3}".r
-
   def validateClusteredConfig[F[_]: Sync](config: ClusterConfig): F[ClusterConfig] =
     for
       _ <- Sync[F].fromEither(validateConfig(config))
@@ -77,7 +75,5 @@ object StartupValidation:
   private def isExplicitHost(raw: String): Boolean =
     val normalized = raw.trim.toLowerCase
     normalized == "localhost" ||
-    normalized == "::1" ||
-    normalized.startsWith("127.") ||
-    ipv4Pattern.matches(normalized) ||
-    normalized.contains(":")
+    Ipv4Address.fromString(normalized).isDefined ||
+    Ipv6Address.fromString(normalized).isDefined
