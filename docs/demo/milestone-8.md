@@ -9,6 +9,8 @@ This runbook gives a reviewer two ways to evaluate Tenure:
 
 The milestone intentionally stays local-first and dependency-light. It does not claim production readiness.
 
+For a visual map of the main v1 runtime and evaluator paths, see [request-flow diagrams](../diagrams/request-flow.md). That page now includes startup/bootstrap, lease lifecycle, `NOT_LEADER` retry, restart recovery, and failure-injection diagrams that match the flows exercised here.
+
 ## What Milestone 8 adds
 
 - clustered startup validation for static config, peer endpoints, and data-directory expectations

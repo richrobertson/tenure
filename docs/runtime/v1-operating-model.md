@@ -60,6 +60,15 @@ If a future release needs multiplexing for operational or performance reasons, i
 
 Each node is expected to have a writable local data directory for Raft metadata, the replicated log, snapshots, and any materialized lease-state indexes. The system replicates commands and authoritative state transitions, not filesystem contents.
 
+At a high level, the local persistence contract is:
+
+- `metadata.json` tracks Raft term/vote/commit/apply (`lastApplied`) progress
+- `log.jsonl` stores ordered replicated entries
+- `snapshot.json` stores the latest local recovery snapshot of materialized service state
+- `node-id` binds that directory to one configured node ID so operators do not accidentally reuse persisted state under a different identity
+
+Restart recovery then rebuilds the node from snapshot-plus-log replay before the node rejoins the cluster. For a more detailed layer overview and flow diagrams, see [the architecture spec](../architecture/v1.md) and [request-flow diagrams](../diagrams/request-flow.md).
+
 ## Direct-host deployment assumptions
 
 The default deployment model is direct installation on Linux compute hosts or VMs, supervised by `systemd` or an equivalent local process manager. Container packaging is optional, but Tenure v1 should not be described as if Kubernetes or another orchestrator is required for basic operation.
