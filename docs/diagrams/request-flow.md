@@ -197,7 +197,7 @@ flowchart TD
     D --> E[Load log.jsonl entries]
     E --> F[Choose base state from snapshot or empty ServiceState]
     F --> G[Recover commitIndex = max(snapshot.lastIncludedIndex, persisted metadata.commitIndex)]
-    G --> H[Replay committed log entries with index in (snapshot.lastIncludedIndex, commitIndex]]
+    G --> H[Replay committed log entries with index in (snapshot.lastIncludedIndex, commitIndex]
     H --> I[Set lastApplied = recovered commitIndex]
     I --> J[Node can rejoin as follower and catch up]
 ```
