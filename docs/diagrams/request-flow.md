@@ -183,7 +183,7 @@ sequenceDiagram
     N->>P: Validate node-id marker and reopen persisted state
     N->>L: Rejoin cluster
     L->>N: Send log catch-up / snapshot as needed
-    N->>F: Resume follower replication
+    L->>N: Resume steady-state heartbeats / replication
     N-->>O: Follower view matches committed lease state
 ```
 
@@ -196,9 +196,10 @@ flowchart TD
     C --> D[Load snapshot.json if present]
     D --> E[Load log.jsonl entries]
     E --> F[Choose base state from snapshot or empty ServiceState]
-    F --> G[Replay committed log entries above snapshot index]
-    G --> H[Recover commitIndex and lastApplied]
-    H --> I[Node can rejoin as follower and catch up]
+    F --> G[Recover commitIndex = max(snapshot.lastIncludedIndex, persisted metadata.commitIndex)]
+    G --> H[Replay committed log entries with index in (snapshot.lastIncludedIndex, commitIndex]]
+    H --> I[Set lastApplied = recovered commitIndex]
+    I --> J[Node can rejoin as follower and catch up]
 ```
 
 ## Failure-injection delay demo path
