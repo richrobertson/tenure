@@ -163,12 +163,20 @@ private final case class RoutedLeaseService[F[_]: Async](
       requestContext: RequestContext,
       fingerprint: RequestFingerprint
   ): F[Either[ServiceError, Option[StoredResponse]]] =
-    orderedGroupIds.traverse(groupId => runtime(groupId).readState.map(_.responses.get((requestContext.tenantId, requestContext.requestId)))).map { stored =>
-      stored.flatten.toList match
-        case Nil => Right(None)
-        case head :: tail if (head :: tail).forall(_.fingerprint == fingerprint) => Right(Some(head))
-        case _ => Left(ServiceError.InvalidRequest("request_id cannot be reused for a different operation, resource, or parameters"))
-    }
+    def loop(remaining: List[GroupId], firstMatch: Option[StoredResponse]): F[Either[ServiceError, Option[StoredResponse]]] =
+      remaining match
+        case Nil => Right(firstMatch).pure[F]
+        case groupId :: tail =>
+          runtime(groupId).readState.flatMap { state =>
+            state.responses.get((requestContext.tenantId, requestContext.requestId)) match
+              case None => loop(tail, firstMatch)
+              case Some(stored) if stored.fingerprint != fingerprint =>
+                Left(ServiceError.InvalidRequest("request_id cannot be reused for a different operation, resource, or parameters")).pure[F]
+              case Some(stored) =>
+                loop(tail, firstMatch.orElse(Some(stored)))
+          }
+
+    loop(orderedGroupIds.toList, None)
 
   private def validateGlobalActiveLeaseQuota(tenantId: TenantId): F[Option[ServiceError]] =
     clock.now.flatMap { now =>

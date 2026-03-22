@@ -65,6 +65,7 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       resourceA = resourceForGroup(router, GroupId("group-1"), "serial-a")
       resourceB = resourceForGroup(router, GroupId("group-2"), "serial-b")
       firstStarted <- Deferred[IO, Unit]
+      secondStarted <- Deferred[IO, Unit]
       releaseFirst <- Deferred[IO, Unit]
       secondEntered <- Deferred[IO, Unit]
       gatedGroups = groups.map {
@@ -77,8 +78,9 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       service <- LeaseService.routed[IO](router, gatedGroups, clock, observability)
       firstFiber <- service.acquire(AcquireRequest(principal, tenantId.value, resourceA.value, "holder-a", 10, "req-serial")).start
       _ <- firstStarted.get
-      secondFiber <- service.acquire(AcquireRequest(principal, tenantId.value, resourceB.value, "holder-b", 10, "req-serial")).start
-      secondObservedBeforeRelease <- assertBlocked(secondEntered)
+      secondFiber <- (secondStarted.complete(()).void *> service.acquire(AcquireRequest(principal, tenantId.value, resourceB.value, "holder-b", 10, "req-serial"))).start
+      _ <- secondStarted.get
+      secondObservedBeforeRelease <- assertStillBlocked(secondEntered)
       _ = assertEquals(secondObservedBeforeRelease, Right(()))
       _ <- releaseFirst.complete(()).void
       first <- firstFiber.joinWithNever
@@ -98,6 +100,7 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       resourceA = resourceForGroup(router, GroupId("group-1"), "quota-a")
       resourceB = resourceForGroup(router, GroupId("group-2"), "quota-b")
       firstStarted <- Deferred[IO, Unit]
+      secondStarted <- Deferred[IO, Unit]
       releaseFirst <- Deferred[IO, Unit]
       secondEntered <- Deferred[IO, Unit]
       gatedGroups = groups.map {
@@ -110,8 +113,9 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       service <- LeaseService.routed[IO](router, gatedGroups, clock, quotas, com.richrobertson.tenure.auth.Authorization.perTenant, observability)
       firstFiber <- service.acquire(AcquireRequest(principal, tenantId.value, resourceA.value, "holder-a", 10, "req-1")).start
       _ <- firstStarted.get
-      secondFiber <- service.acquire(AcquireRequest(principal, tenantId.value, resourceB.value, "holder-b", 10, "req-2")).start
-      secondObservedBeforeRelease <- assertBlocked(secondEntered)
+      secondFiber <- (secondStarted.complete(()).void *> service.acquire(AcquireRequest(principal, tenantId.value, resourceB.value, "holder-b", 10, "req-2"))).start
+      _ <- secondStarted.get
+      secondObservedBeforeRelease <- assertStillBlocked(secondEntered)
       _ = assertEquals(secondObservedBeforeRelease, Right(()))
       _ <- releaseFirst.complete(()).void
       first <- firstFiber.joinWithNever
@@ -133,6 +137,7 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       leaseIdA = acquiredA.toOption.flatMap(_.lease.leaseId).map(_.value.toString).getOrElse(fail("expected first lease"))
       leaseIdB = acquiredB.toOption.flatMap(_.lease.leaseId).map(_.value.toString).getOrElse(fail("expected second lease"))
       firstStarted <- Deferred[IO, Unit]
+      secondStarted <- Deferred[IO, Unit]
       releaseFirst <- Deferred[IO, Unit]
       secondEntered <- Deferred[IO, Unit]
       gatedGroups = groups.map {
@@ -145,8 +150,9 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       lockedService <- LeaseService.routed[IO](router, gatedGroups, clock, observability)
       firstFiber <- lockedService.renew(RenewRequest(principal, tenantId.value, resourceA.value, leaseIdA, "holder-a", 10, "renew-req")).start
       _ <- firstStarted.get
-      secondFiber <- lockedService.renew(RenewRequest(principal, tenantId.value, resourceB.value, leaseIdB, "holder-b", 10, "renew-req")).start
-      secondObservedBeforeRelease <- assertBlocked(secondEntered)
+      secondFiber <- (secondStarted.complete(()).void *> lockedService.renew(RenewRequest(principal, tenantId.value, resourceB.value, leaseIdB, "holder-b", 10, "renew-req"))).start
+      _ <- secondStarted.get
+      secondObservedBeforeRelease <- assertStillBlocked(secondEntered)
       _ = assertEquals(secondObservedBeforeRelease, Right(()))
       _ <- releaseFirst.complete(()).void
       first <- firstFiber.joinWithNever
@@ -168,6 +174,7 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       leaseIdA = acquiredA.toOption.flatMap(_.lease.leaseId).map(_.value.toString).getOrElse(fail("expected first lease"))
       leaseIdB = acquiredB.toOption.flatMap(_.lease.leaseId).map(_.value.toString).getOrElse(fail("expected second lease"))
       firstStarted <- Deferred[IO, Unit]
+      secondStarted <- Deferred[IO, Unit]
       releaseFirst <- Deferred[IO, Unit]
       secondEntered <- Deferred[IO, Unit]
       gatedGroups = groups.map {
@@ -180,8 +187,9 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
       lockedService <- LeaseService.routed[IO](router, gatedGroups, clock, observability)
       firstFiber <- lockedService.release(ReleaseRequest(principal, tenantId.value, resourceA.value, leaseIdA, "holder-a", "release-req")).start
       _ <- firstStarted.get
-      secondFiber <- lockedService.release(ReleaseRequest(principal, tenantId.value, resourceB.value, leaseIdB, "holder-b", "release-req")).start
-      secondObservedBeforeRelease <- assertBlocked(secondEntered)
+      secondFiber <- (secondStarted.complete(()).void *> lockedService.release(ReleaseRequest(principal, tenantId.value, resourceB.value, leaseIdB, "holder-b", "release-req"))).start
+      _ <- secondStarted.get
+      secondObservedBeforeRelease <- assertStillBlocked(secondEntered)
       _ = assertEquals(secondObservedBeforeRelease, Right(()))
       _ <- releaseFirst.complete(()).void
       first <- firstFiber.joinWithNever
@@ -252,8 +260,11 @@ class RoutedLeaseServiceSpec extends CatsEffectSuite:
   private def wrapAcquire(group: GroupRuntime[IO])(beforeAcquire: IO[Unit]): GroupRuntime[IO] =
     wrapGroup(group, beforeAcquire = beforeAcquire)
 
-  private def assertBlocked(signal: Deferred[IO, Unit]): IO[Either[Unit, Unit]] =
-    IO.race(signal.get, IO.sleep(scala.concurrent.duration.DurationInt(200).millis).void)
+  private def assertStillBlocked(signal: Deferred[IO, Unit]): IO[Either[Unit, Unit]] =
+    signal.tryGet.map {
+      case Some(_) => Left(())
+      case None    => Right(())
+    }
 
   private def wrapGroup(
       group: GroupRuntime[IO],
