@@ -235,10 +235,12 @@ object LocalEvaluation extends IOApp:
 
   private def awaitFollowerLeaseStatus(node: RaftNode[IO], tenantId: TenantId, resourceId: ResourceId, expected: LeaseStatus): IO[Unit] =
     eventually(s"follower view for ${resourceId.value}") {
-      node.readState.map { state =>
-        val status = state.leaseState.get(com.richrobertson.tenure.model.ResourceKey(tenantId, resourceId)).fold(LeaseStatus.Absent)(_.status)
-        if status == expected then ()
-        else throw new IllegalStateException(s"expected $expected for ${resourceId.value}, found $status")
+      IO.realTimeInstant.flatMap { at =>
+        node.readState.map { state =>
+          val status = state.leaseState.viewAt(com.richrobertson.tenure.model.ResourceKey(tenantId, resourceId), at).status
+          if status == expected then ()
+          else throw new IllegalStateException(s"expected $expected for ${resourceId.value}, found $status")
+        }
       }
     }
 

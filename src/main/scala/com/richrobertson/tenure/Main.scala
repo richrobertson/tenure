@@ -51,7 +51,7 @@ object Main extends IOApp:
         .default[IO]
         .withHost(host)
         .withPort(port)
-        .withHttpApp(httpApp(service, observability.snapshot, debugEnabled = true))
+        .withHttpApp(httpApp(service, observability.snapshot, debugEnabled = isLoopback(localApiHost)))
         .build
     yield ()
 

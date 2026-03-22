@@ -11,7 +11,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 
 class StartupValidationSpec extends CatsEffectSuite:
-  test("cluster config rejects duplicate peer ids and multiplexed ports") {
+  test("cluster config rejects duplicate peer ids and duplicate local peer entries") {
     val config = ClusterConfig(
       nodeId = "node-1",
       apiHost = "127.0.0.1",
@@ -48,6 +48,21 @@ class StartupValidationSpec extends CatsEffectSuite:
     ))
   }
 
+  test("cluster config rejects multiplexed raft and api ports") {
+    val config = ClusterConfig(
+      nodeId = "node-1",
+      apiHost = "127.0.0.1",
+      apiPort = 9101,
+      peers = List(
+        PeerNode("node-1", "127.0.0.1", 9101, "127.0.0.1", 9101)
+      ),
+      dataDir = "/tmp/tenure-startup-validation-c"
+    )
+
+    val result = StartupValidation.validateConfig(config)
+    assert(result.left.exists(_.getMessage.contains("must use different raft and API ports")))
+  }
+
   test("data directory validation rejects file paths") {
     IO.blocking(Files.createTempFile("tenure-startup-validation", ".txt")).flatMap { file =>
       StartupValidation.validateDataDir[IO](file.toString, "demo dataDir").attempt.map { result =>
@@ -62,6 +77,16 @@ class StartupValidationSpec extends CatsEffectSuite:
       IO.blocking(Files.writeString(marker, "node-a\n", StandardCharsets.UTF_8)) *>
         RaftPersistence.fileBacked[IO](root.toString, "node-b", Observability.noop[IO]).attempt.map { result =>
           assert(result.left.exists(_.getMessage.contains("belongs to node 'node-a'")))
+        }
+    }
+  }
+
+  test("file-backed persistence rejects empty node ownership markers") {
+    IO.blocking(Files.createTempDirectory("tenure-startup-empty-node-id")).flatMap { root =>
+      val marker = root.resolve("node-id")
+      IO.blocking(Files.writeString(marker, "   \n", StandardCharsets.UTF_8)) *>
+        RaftPersistence.fileBacked[IO](root.toString, "node-a", Observability.noop[IO]).attempt.map { result =>
+          assert(result.left.exists(_.getMessage.contains("empty 'node-id' marker")))
         }
     }
   }

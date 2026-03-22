@@ -37,7 +37,7 @@ object RaftPersistence:
       failureInjector: FailureInjector[F],
       observability: Observability[F]
   )(using Codec[PersistedNodeState], Codec[PersistedMetadata], Codec[RaftLogEntry], Codec[PersistedSnapshot], Codec[ServiceState]): F[RaftPersistence[F]] =
-    Sync[F].delay {
+    Sync[F].blocking {
       val root = Paths.get(dataDir)
       PersistenceLayout.prepare(root, nodeId)
       new FileBackedRaftPersistence[F](root, nodeId, failureInjector, observability)
@@ -138,7 +138,11 @@ private object PersistenceLayout:
     val markerPath = root.resolve(markerFileName)
     if Files.exists(markerPath) then
       val storedNodeId = Files.readString(markerPath, StandardCharsets.UTF_8).trim
-      if storedNodeId.nonEmpty && storedNodeId != nodeId then
+      if storedNodeId.isEmpty then
+        throw new IllegalArgumentException(
+          s"data directory $root has an empty '$markerFileName' marker; please fix or remove the directory before reuse"
+        )
+      else if storedNodeId != nodeId then
         throw new IllegalArgumentException(
           s"data directory $root belongs to node '$storedNodeId', not '$nodeId'"
         )
