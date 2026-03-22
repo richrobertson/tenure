@@ -5,6 +5,8 @@
 - [Milestones](milestones.md)
 - [ADR: v1 single Raft group and logical multitenancy](adr/0001-v1-single-raft-group-logical-multitenancy.md)
 - [Request-flow and lifecycle diagrams](diagrams/request-flow.md)
+- [Scaladoc maintenance](scaladoc.md)
+- Generated Scaladoc site: open the generated `target/scala-*/api/index.html` locally after running `sbt doc`
 - [Terminology](terminology.md)
 - [Milestone 7 routing/multi-group demo](demo/milestone-7.md)
 - [Milestone 8 hardening/benchmark demo](demo/milestone-8.md)

@@ -1,3 +1,10 @@
+/**
+ * Lease-service request/response contracts plus concrete service implementations.
+ *
+ * This package is the main application layer of Tenure. It validates caller input, enforces authorization
+ * and quota policy, manages idempotency, and delegates authoritative mutation either to an in-memory state
+ * machine or to a replicated Raft-backed runtime.
+ */
 package com.richrobertson.tenure.service
 
 import cats.effect.kernel.Async
@@ -15,28 +22,48 @@ import com.richrobertson.tenure.time.Clock
 import java.time.Instant
 import java.util.UUID
 
+/** Effectful service interface for lease lifecycle and read operations. */
 trait LeaseService[F[_]]:
+  /** Attempts to acquire a lease for one `(tenant_id, resource_id)` pair. */
   def acquire(request: AcquireRequest): F[Either[ServiceError, AcquireResult]]
+  /** Attempts to renew an existing lease epoch. */
   def renew(request: RenewRequest): F[Either[ServiceError, RenewResult]]
+  /** Attempts to release an active lease. */
   def release(request: ReleaseRequest): F[Either[ServiceError, ReleaseResult]]
+  /** Returns the current lease view for one resource. */
   def getLease(request: GetLeaseRequest): F[Either[ServiceError, GetLeaseResult]]
+  /** Lists lease views for one tenant. */
   def listLeases(request: ListLeasesRequest): F[Either[ServiceError, ListLeasesResult]]
 
+/** Runtime bundle pairing a [[LeaseService]] with a state-read hook. */
 final case class LeaseServiceRuntime[F[_]](service: LeaseService[F], readState: F[ServiceState])
 
+/** Acquire request at the service boundary. */
 final case class AcquireRequest(principal: Principal, tenantId: String, resourceId: String, holderId: String, ttlSeconds: Long, requestId: String)
+/** Renew request at the service boundary. */
 final case class RenewRequest(principal: Principal, tenantId: String, resourceId: String, leaseId: String, holderId: String, ttlSeconds: Long, requestId: String)
+/** Release request at the service boundary. */
 final case class ReleaseRequest(principal: Principal, tenantId: String, resourceId: String, leaseId: String, holderId: String, requestId: String)
+/** Read request for one lease. */
 final case class GetLeaseRequest(principal: Principal, tenantId: String, resourceId: String)
+/** Tenant-scoped read request for all leases. */
 final case class ListLeasesRequest(principal: Principal, tenantId: String)
 
+/** Successful acquire result. */
 final case class AcquireResult(lease: LeaseView, created: Boolean)
+/** Successful renew result. */
 final case class RenewResult(lease: LeaseView, renewed: Boolean)
+/** Successful release result. */
 final case class ReleaseResult(lease: LeaseView, released: Boolean)
+/** Successful single-resource read result. */
 final case class GetLeaseResult(found: Boolean, lease: LeaseView)
+/** Successful tenant-scoped read result. */
 final case class ListLeasesResult(leases: List[LeaseView])
 
+/** Service-layer error surface returned to API and evaluator callers. */
 sealed trait ServiceError derives CanEqual
+
+/** Concrete [[ServiceError]] cases. */
 object ServiceError:
   final case class InvalidRequest(message: String) extends ServiceError
   final case class Unauthorized(message: String) extends ServiceError
@@ -48,9 +75,11 @@ object ServiceError:
   final case class QuotaExceeded(message: String) extends ServiceError
   final case class NotLeader(message: String, leaderHint: Option[String]) extends ServiceError
 
+/** Operation kind encoded into request-id fingerprints. */
 enum RequestOperation:
   case Acquire, Renew, Release
 
+/** Canonical identity of a mutating request for idempotency comparisons. */
 final case class RequestFingerprint(
     operation: RequestOperation,
     resourceKey: ResourceKey,
@@ -59,23 +88,36 @@ final case class RequestFingerprint(
     ttlSeconds: Option[Long]
 ) derives CanEqual
 
+/** Stored replayable result for a previously applied mutating request. */
 sealed trait StoredResult derives CanEqual
+
+/** Concrete [[StoredResult]] wrappers for each write operation. */
 object StoredResult:
   final case class Acquire(value: Either[ServiceError, AcquireResult]) extends StoredResult
   final case class Renew(value: Either[ServiceError, RenewResult]) extends StoredResult
   final case class Release(value: Either[ServiceError, ReleaseResult]) extends StoredResult
 
+/** Stored request fingerprint plus its replayable result. */
 final case class StoredResponse(fingerprint: RequestFingerprint, result: StoredResult) derives CanEqual
+/** Complete service-layer authoritative state. */
 final case class ServiceState(leaseState: LeaseState, responses: Map[(TenantId, RequestId), StoredResponse]) derives CanEqual
 
+/** Constructors for [[ServiceState]]. */
 object ServiceState:
+  /** Empty service state with no leases and no idempotency history. */
   val empty: ServiceState = ServiceState(LeaseState.empty, Map.empty)
 
+/** Command shape replicated through Raft and applied to [[ServiceState]]. */
 sealed trait ReplicatedCommand derives CanEqual:
+  /** Tenant/request/resource context that ties the command back to the caller. */
   def requestContext: RequestContext
+  /** Authoritative apply/admission instant used for lease timing. */
   def appliedAt: Instant
 
+/** Shared mutating request context. */
 final case class RequestContext(tenantId: TenantId, requestId: RequestId, resourceKey: ResourceKey) derives CanEqual
+
+/** Replicated acquire command. */
 final case class AcquireCommand(
     requestContext: RequestContext,
     holderId: ClientId,
@@ -84,9 +126,11 @@ final case class AcquireCommand(
     quotaPolicy: TenantQuotaPolicy,
     appliedAt: Instant
 ) extends ReplicatedCommand derives CanEqual:
+  /** Idempotency fingerprint for this acquire. */
   def fingerprint: RequestFingerprint =
     RequestFingerprint(RequestOperation.Acquire, requestContext.resourceKey, holderId, None, Some(ttlSeconds))
 
+/** Replicated renew command. */
 final case class RenewCommand(
     requestContext: RequestContext,
     leaseId: LeaseId,
@@ -95,26 +139,36 @@ final case class RenewCommand(
     quotaPolicy: TenantQuotaPolicy,
     appliedAt: Instant
 ) extends ReplicatedCommand derives CanEqual:
+  /** Idempotency fingerprint for this renew. */
   def fingerprint: RequestFingerprint =
     RequestFingerprint(RequestOperation.Renew, requestContext.resourceKey, holderId, Some(leaseId), Some(ttlSeconds))
 
+/** Replicated release command. */
 final case class ReleaseCommand(
     requestContext: RequestContext,
     leaseId: LeaseId,
     holderId: ClientId,
     appliedAt: Instant
 ) extends ReplicatedCommand derives CanEqual:
+  /** Idempotency fingerprint for this release. */
   def fingerprint: RequestFingerprint =
     RequestFingerprint(RequestOperation.Release, requestContext.resourceKey, holderId, Some(leaseId), None)
 
+/**
+ * Applies replicated commands to [[ServiceState]].
+ *
+ * This is the service-layer materializer used both during live command application and during recovery
+ * replay from persisted log/snapshot state.
+ */
 object LeaseMaterializer:
+  /** Applies one replicated command and returns the next [[ServiceState]]. */
   def applyCommand(state: ServiceState, command: ReplicatedCommand): ServiceState =
     command match
       case command: AcquireCommand =>
         handleCommand(state, command.requestContext, command.fingerprint, StoredResult.Acquire.apply) {
-          TenantQuotaRegistry.default.validateTtl(command.quotaPolicy, command.requestContext.tenantId, command.ttlSeconds).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
+          TenantQuotaRegistry.validateTtl(command.quotaPolicy, command.requestContext.tenantId, command.ttlSeconds).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
             val activeCount = state.leaseState.activeLeaseCount(command.requestContext.tenantId, command.appliedAt)
-            TenantQuotaRegistry.default.validateActiveLeases(command.quotaPolicy, command.requestContext.tenantId, activeCount).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
+            TenantQuotaRegistry.validateActiveLeases(command.quotaPolicy, command.requestContext.tenantId, activeCount).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
               LeaseStateMachine.transition(
                 state.leaseState,
                 com.richrobertson.tenure.model.Acquire(command.requestContext.resourceKey, command.holderId, command.ttlSeconds, command.leaseId),
@@ -130,7 +184,7 @@ object LeaseMaterializer:
 
       case command: RenewCommand =>
         handleCommand(state, command.requestContext, command.fingerprint, StoredResult.Renew.apply) {
-          TenantQuotaRegistry.default.validateTtl(command.quotaPolicy, command.requestContext.tenantId, command.ttlSeconds).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
+          TenantQuotaRegistry.validateTtl(command.quotaPolicy, command.requestContext.tenantId, command.ttlSeconds).leftMap(ServiceError.QuotaExceeded.apply).flatMap { _ =>
             LeaseStateMachine.transition(
               state.leaseState,
               com.richrobertson.tenure.model.Renew(command.requestContext.resourceKey, command.leaseId, command.holderId, command.ttlSeconds),
@@ -173,18 +227,22 @@ object LeaseMaterializer:
           case Left(error) => withResponse(state, requestContext, fingerprint, wrap(Left(error)))
           case Right((nextState, value)) => withResponse(nextState, requestContext, fingerprint, wrap(Right(value)))
 
+  /** Extracts a replayable acquire result from a stored response value. */
   def replayAcquire(result: StoredResult): Option[Either[ServiceError, AcquireResult]] = result match
     case StoredResult.Acquire(value) => Some(value)
     case _                           => None
 
+  /** Extracts a replayable renew result from a stored response value. */
   def replayRenew(result: StoredResult): Option[Either[ServiceError, RenewResult]] = result match
     case StoredResult.Renew(value) => Some(value)
     case _                         => None
 
+  /** Extracts a replayable release result from a stored response value. */
   def replayRelease(result: StoredResult): Option[Either[ServiceError, ReleaseResult]] = result match
     case StoredResult.Release(value) => Some(value)
     case _                           => None
 
+  /** Maps pure domain/state-machine errors into service-layer errors. */
   def mapError(error: LeaseError): ServiceError =
     error match
       case LeaseError.AlreadyHeld(activeLease) => ServiceError.AlreadyHeld(LeaseError.AlreadyHeld(activeLease).message)
@@ -196,16 +254,21 @@ object LeaseMaterializer:
   private def withResponse(state: ServiceState, requestContext: RequestContext, fingerprint: RequestFingerprint, result: StoredResult): ServiceState =
     state.copy(responses = state.responses.updated((requestContext.tenantId, requestContext.requestId), StoredResponse(fingerprint, result)))
 
+/** Factory methods for in-memory, replicated, and routed lease services. */
 object LeaseService:
+  /** Creates an in-memory service with default quotas, auth, and no-op observability. */
   def inMemory[F[_]: Async](clock: Clock[F]): F[LeaseService[F]] =
     inMemoryRuntime(clock, TenantQuotaRegistry.default, Authorization.perTenant, Observability.noop[F]).map(_.service)
 
+  /** Creates an in-memory service with caller-supplied quotas. */
   def inMemory[F[_]: Async](clock: Clock[F], quotas: TenantQuotaRegistry): F[LeaseService[F]] =
     inMemoryRuntime(clock, quotas, Authorization.perTenant, Observability.noop[F]).map(_.service)
 
+  /** Creates an in-memory service with caller-supplied quotas and authorization. */
   def inMemory[F[_]: Async](clock: Clock[F], quotas: TenantQuotaRegistry, authorization: Authorization): F[LeaseService[F]] =
     inMemoryRuntime(clock, quotas, authorization, Observability.noop[F]).map(_.service)
 
+  /** Creates an in-memory service with full caller control over supporting dependencies. */
   def inMemory[F[_]: Async](
       clock: Clock[F],
       quotas: TenantQuotaRegistry,
@@ -214,6 +277,7 @@ object LeaseService:
   ): F[LeaseService[F]] =
     inMemoryRuntime(clock, quotas, authorization, observability).map(_.service)
 
+  /** Creates an in-memory runtime bundle including `readState`. */
   def inMemoryRuntime[F[_]: Async](
       clock: Clock[F],
       quotas: TenantQuotaRegistry,
@@ -226,12 +290,15 @@ object LeaseService:
       service = LocalLeaseService[F](stateRef, mutationLock, clock, quotas, authorization, observability)
     yield LeaseServiceRuntime(service, stateRef.get)
 
+  /** Creates a replicated service backed by a [[RaftNode]]. */
   def replicated[F[_]: Async](raftNode: RaftNode[F], clock: Clock[F]): LeaseService[F] =
     replicatedRuntime(raftNode, clock, TenantQuotaRegistry.default, Authorization.perTenant, Observability.noop[F]).service
 
+  /** Creates a replicated service with caller-supplied observability. */
   def replicated[F[_]: Async](raftNode: RaftNode[F], clock: Clock[F], observability: Observability[F]): LeaseService[F] =
     replicatedRuntime(raftNode, clock, TenantQuotaRegistry.default, Authorization.perTenant, observability).service
 
+  /** Creates a replicated service with full caller control over supporting dependencies. */
   def replicated[F[_]: Async](
       raftNode: RaftNode[F],
       clock: Clock[F],
@@ -241,6 +308,7 @@ object LeaseService:
   ): LeaseService[F] =
     replicatedRuntime(raftNode, clock, quotas, authorization, observability).service
 
+  /** Creates a replicated runtime bundle including `readState`. */
   def replicatedRuntime[F[_]: Async](
       raftNode: RaftNode[F],
       clock: Clock[F],
@@ -250,12 +318,20 @@ object LeaseService:
   ): LeaseServiceRuntime[F] =
     LeaseServiceRuntime(ReplicatedLeaseService[F](raftNode, clock, quotas, authorization, observability), raftNode.readState)
 
+  /** Creates a routed service with default quotas, auth, and no-op observability. */
   def routed[F[_]: Async](router: Router, groups: List[GroupRuntime[F]], clock: Clock[F]): F[LeaseService[F]] =
     routed(router, groups, clock, TenantQuotaRegistry.default, Authorization.perTenant, Observability.noop[F])
 
+  /** Creates a routed service with caller-supplied observability. */
   def routed[F[_]: Async](router: Router, groups: List[GroupRuntime[F]], clock: Clock[F], observability: Observability[F]): F[LeaseService[F]] =
     routed(router, groups, clock, TenantQuotaRegistry.default, Authorization.perTenant, observability)
 
+  /**
+   * Creates a routed service over one or more logical groups.
+   *
+   * Even in local multi-group mode, the caller-facing API stays keyed by tenant/resource rather than by
+   * physical group placement.
+   */
   def routed[F[_]: Async](
       router: Router,
       groups: List[GroupRuntime[F]],
@@ -272,6 +348,7 @@ object LeaseService:
         RoutedLeaseService(router, groups.map(group => group.groupId -> group).toMap, clock, quotas, authorization, observability, admissionLocks)
       }
 
+/** Shared request-validation helpers used by local and replicated services. */
 private[service] trait ValidationSupport:
   final case class ValidAcquire(resourceKey: ResourceKey, holderId: ClientId, ttlSeconds: Long, requestContext: RequestContext, fingerprint: RequestFingerprint)
   final case class ValidMutating(resourceKey: ResourceKey, leaseId: LeaseId, holderId: ClientId, ttlSeconds: Long, requestContext: RequestContext, fingerprint: RequestFingerprint)
@@ -347,6 +424,7 @@ private[service] trait ValidationSupport:
   protected def parseLeaseId(value: String): Either[String, LeaseId] =
     Either.catchNonFatal(UUID.fromString(value.trim)).leftMap(_ => "lease_id must be a valid UUID").map(LeaseId.apply)
 
+/** Common observability mapping for service operations. */
 object ServiceObservability:
   private def errorCode(error: ServiceError): String =
     error match

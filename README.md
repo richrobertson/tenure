@@ -68,6 +68,8 @@ Milestone 8 is now complete. The repo now includes startup/config hardening for 
 - [Scala-first v1 implementation plan](docs/implementation/v1-plan.md)
 - [ADR: v1 single Raft group and logical multitenancy](docs/adr/0001-v1-single-raft-group-logical-multitenancy.md)
 - [Request-flow diagrams](docs/diagrams/request-flow.md)
+- [Scaladoc maintenance guide](docs/scaladoc.md)
+- Generated Scaladoc site: see the [Scaladoc maintenance guide](docs/scaladoc.md) for how to generate and view it locally from `target/scala-*/api/index.html`
 - [Terminology](docs/terminology.md)
 - [Milestone 1 local demo](docs/demo/milestone-1.md)
 - [Milestone 2 clustered demo](docs/demo/milestone-2.md)

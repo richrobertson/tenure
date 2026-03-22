@@ -196,7 +196,7 @@ private final case class RoutedLeaseService[F[_]: Async](
       orderedGroupIds
         .traverse(groupId => runtime(groupId).readState.map(_.leaseState.activeLeaseCount(tenantId, now)))
         .map(_.sum)
-        .map(activeCount => quotas.validateActiveLeases(quotas.policyFor(tenantId), tenantId, activeCount).leftMap(ServiceError.QuotaExceeded.apply).swap.toOption)
+        .map(activeCount => TenantQuotaRegistry.validateActiveLeases(quotas.policyFor(tenantId), tenantId, activeCount).leftMap(ServiceError.QuotaExceeded.apply).swap.toOption)
     }
 
 private enum DuplicateCheck[+A]:
