@@ -4,10 +4,12 @@ import cats.effect.kernel.Async
 import cats.effect.std.Mutex
 import cats.syntax.all.*
 import com.richrobertson.tenure.auth.{Authorization, Principal}
+import com.richrobertson.tenure.group.GroupRuntime
 import com.richrobertson.tenure.model.*
 import com.richrobertson.tenure.observability.{LogEvent, Observability}
 import com.richrobertson.tenure.quota.{TenantQuotaPolicy, TenantQuotaRegistry}
 import com.richrobertson.tenure.raft.RaftNode
+import com.richrobertson.tenure.routing.Router
 import com.richrobertson.tenure.statemachine.{LeaseState, LeaseStateMachine}
 import com.richrobertson.tenure.time.Clock
 import java.time.Instant
@@ -19,6 +21,8 @@ trait LeaseService[F[_]]:
   def release(request: ReleaseRequest): F[Either[ServiceError, ReleaseResult]]
   def getLease(request: GetLeaseRequest): F[Either[ServiceError, GetLeaseResult]]
   def listLeases(request: ListLeasesRequest): F[Either[ServiceError, ListLeasesResult]]
+
+final case class LeaseServiceRuntime[F[_]](service: LeaseService[F], readState: F[ServiceState])
 
 final case class AcquireRequest(principal: Principal, tenantId: String, resourceId: String, holderId: String, ttlSeconds: Long, requestId: String)
 final case class RenewRequest(principal: Principal, tenantId: String, resourceId: String, leaseId: String, holderId: String, ttlSeconds: Long, requestId: String)
@@ -194,13 +198,13 @@ object LeaseMaterializer:
 
 object LeaseService:
   def inMemory[F[_]: Async](clock: Clock[F]): F[LeaseService[F]] =
-    inMemory(clock, TenantQuotaRegistry.default, Authorization.perTenant, Observability.noop[F])
+    inMemoryRuntime(clock, TenantQuotaRegistry.default, Authorization.perTenant, Observability.noop[F]).map(_.service)
 
   def inMemory[F[_]: Async](clock: Clock[F], quotas: TenantQuotaRegistry): F[LeaseService[F]] =
-    inMemory(clock, quotas, Authorization.perTenant, Observability.noop[F])
+    inMemoryRuntime(clock, quotas, Authorization.perTenant, Observability.noop[F]).map(_.service)
 
   def inMemory[F[_]: Async](clock: Clock[F], quotas: TenantQuotaRegistry, authorization: Authorization): F[LeaseService[F]] =
-    inMemory(clock, quotas, authorization, Observability.noop[F])
+    inMemoryRuntime(clock, quotas, authorization, Observability.noop[F]).map(_.service)
 
   def inMemory[F[_]: Async](
       clock: Clock[F],
@@ -208,24 +212,67 @@ object LeaseService:
       authorization: Authorization,
       observability: Observability[F]
   ): F[LeaseService[F]] =
+    inMemoryRuntime(clock, quotas, authorization, observability).map(_.service)
+
+  def inMemoryRuntime[F[_]: Async](
+      clock: Clock[F],
+      quotas: TenantQuotaRegistry,
+      authorization: Authorization,
+      observability: Observability[F]
+  ): F[LeaseServiceRuntime[F]] =
     for
       stateRef <- cats.effect.Ref.of[F, ServiceState](ServiceState.empty)
       mutationLock <- Mutex[F]
-    yield LocalLeaseService[F](stateRef, mutationLock, clock, quotas, authorization, observability)
+      service = LocalLeaseService[F](stateRef, mutationLock, clock, quotas, authorization, observability)
+    yield LeaseServiceRuntime(service, stateRef.get)
 
   def replicated[F[_]: Async](raftNode: RaftNode[F], clock: Clock[F]): LeaseService[F] =
-    replicated(raftNode, clock, TenantQuotaRegistry.default, Authorization.perTenant, Observability.noop[F])
+    replicatedRuntime(raftNode, clock, TenantQuotaRegistry.default, Authorization.perTenant, Observability.noop[F]).service
+
+  def replicated[F[_]: Async](raftNode: RaftNode[F], clock: Clock[F], observability: Observability[F]): LeaseService[F] =
+    replicatedRuntime(raftNode, clock, TenantQuotaRegistry.default, Authorization.perTenant, observability).service
 
   def replicated[F[_]: Async](
       raftNode: RaftNode[F],
       clock: Clock[F],
-      quotas: TenantQuotaRegistry = TenantQuotaRegistry.default,
-      authorization: Authorization = Authorization.perTenant,
+      quotas: TenantQuotaRegistry,
+      authorization: Authorization,
       observability: Observability[F]
   ): LeaseService[F] =
-    ReplicatedLeaseService[F](raftNode, clock, quotas, authorization, observability)
+    replicatedRuntime(raftNode, clock, quotas, authorization, observability).service
 
-private trait ValidationSupport:
+  def replicatedRuntime[F[_]: Async](
+      raftNode: RaftNode[F],
+      clock: Clock[F],
+      quotas: TenantQuotaRegistry,
+      authorization: Authorization,
+      observability: Observability[F]
+  ): LeaseServiceRuntime[F] =
+    LeaseServiceRuntime(ReplicatedLeaseService[F](raftNode, clock, quotas, authorization, observability), raftNode.readState)
+
+  def routed[F[_]: Async](router: Router, groups: List[GroupRuntime[F]], clock: Clock[F]): F[LeaseService[F]] =
+    routed(router, groups, clock, TenantQuotaRegistry.default, Authorization.perTenant, Observability.noop[F])
+
+  def routed[F[_]: Async](router: Router, groups: List[GroupRuntime[F]], clock: Clock[F], observability: Observability[F]): F[LeaseService[F]] =
+    routed(router, groups, clock, TenantQuotaRegistry.default, Authorization.perTenant, observability)
+
+  def routed[F[_]: Async](
+      router: Router,
+      groups: List[GroupRuntime[F]],
+      clock: Clock[F],
+      quotas: TenantQuotaRegistry,
+      authorization: Authorization,
+      observability: Observability[F]
+  ): F[LeaseService[F]] =
+    val duplicateGroupIds = groups.groupBy(_.groupId).collect { case (groupId, entries) if entries.size > 1 => groupId }.toList.sortBy(_.value)
+    if duplicateGroupIds.nonEmpty then
+      Async[F].raiseError(new IllegalArgumentException(s"duplicate group ids when constructing LeaseService.routed: ${duplicateGroupIds.map(_.value).mkString(", ")}"))
+    else
+      TenantAdmissionLocks.create[F].map { admissionLocks =>
+        RoutedLeaseService(router, groups.map(group => group.groupId -> group).toMap, clock, quotas, authorization, observability, admissionLocks)
+      }
+
+private[service] trait ValidationSupport:
   final case class ValidAcquire(resourceKey: ResourceKey, holderId: ClientId, ttlSeconds: Long, requestContext: RequestContext, fingerprint: RequestFingerprint)
   final case class ValidMutating(resourceKey: ResourceKey, leaseId: LeaseId, holderId: ClientId, ttlSeconds: Long, requestContext: RequestContext, fingerprint: RequestFingerprint)
   final case class ValidRead(resourceKey: ResourceKey, tenantId: TenantId)

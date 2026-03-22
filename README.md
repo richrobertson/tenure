@@ -56,6 +56,8 @@ Milestone 2 is complete. The repo now contains a single-group Raft integration p
 
 Milestone 5 is now complete. The repo now contains explicit local-disk recovery state for Raft term/vote/commit progress, durable state-machine snapshots, deterministic restart + replay bootstrapping, and snapshot-driven log compaction validated by automated recovery tests and a local demo transcript.
 
+Milestone 7 is now complete. The request path includes an explicit routing layer, deterministic `(tenant_id, resource_id) -> group_id` placement, and a logical `GroupRuntime` boundary so single-group mode remains the default while local multi-group simulation is now possible without changing the client-facing API.
+
 ## Project documents
 
 - [Docs index](docs/index.md)
@@ -73,6 +75,7 @@ Milestone 5 is now complete. The repo now contains explicit local-disk recovery 
 - [Milestone 4 quotas/idempotency/fencing demo](docs/demo/milestone-4.md)
 - [Milestone 5 persistence/recovery demo](docs/demo/milestone-5.md)
 - [Milestone 6 observability/failure-injection demo](docs/demo/milestone-6.md)
+- [Milestone 7 routing/multi-group demo](docs/demo/milestone-7.md)
 
 ## Why leases are different from simple distributed locks
 
@@ -84,13 +87,13 @@ Tenure is intentionally scoped at the point where distributed-systems correctnes
 
 ## Future work
 
-Milestone 6 is now complete. The repo now includes a local observability surface, structured event logs, request-correlation fields, and deterministic failure-injection validation for leader loss, persistence-path delays, retries, recovery, quota/auth denials, and local stale-writer validation artifacts.
+Milestone 7 is now complete. The repo now includes deterministic placement and local multi-group simulation, but it still does not implement live rebalancing, shard migration, cross-node multi-group leadership coordination, or an external placement/control plane.
 
 ## Local prototype
 
 Milestone 1 delivered a minimal single-node HTTP service built with Scala 3, Cats Effect, and http4s. It provides a local API surface, an in-memory lease state machine, deterministic time abstraction for tests, request validation, and tenant-scoped resource identity using `(tenant_id, resource_id)`.
 
-The current prototype intentionally stays narrow: one shared Raft group, TCP peer RPCs without multiplexing, durable metadata/log persistence, deterministic replicated lease lifecycle semantics, tenant-scoped idempotency and quotas, fencing tokens, leader-only reads in v1, and local-disk snapshot + compaction recovery. It still does not implement multi-group sharding, membership changes, or cross-region backup orchestration.
+The current prototype intentionally stays narrow: single-group operation remains the default, but the runtime now passes through an explicit router and logical group runtime seam. It still uses TCP peer RPCs without multiplexing, durable metadata/log persistence, deterministic replicated lease lifecycle semantics, tenant-scoped idempotency and quotas, fencing tokens, leader-only reads in v1, and local-disk snapshot + compaction recovery. It still does not implement live multi-group rebalancing, membership changes, or cross-region backup orchestration.
 
 ### Build and test
 
@@ -104,7 +107,13 @@ sbt test
 sbt run
 ```
 
-This starts the single-node prototype on `0.0.0.0:8080`. To run the clustered mode instead, pass a config file path:
+This starts the single-group local prototype on `0.0.0.0:8080`. To simulate multiple logical groups in one process:
+
+```bash
+sbt "run -- --local-groups 3"
+```
+
+To run the clustered single-group mode instead, pass a config file path:
 
 ```bash
 sbt "run -- node-1.json"
