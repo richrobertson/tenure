@@ -124,6 +124,8 @@ private object PersistenceLayout:
     val trimmedNodeId = nodeId.trim
     if trimmedNodeId.isEmpty then
       throw new IllegalArgumentException("nodeId must be non-empty before preparing persistence")
+    if nodeId != trimmedNodeId then
+      throw new IllegalArgumentException("nodeId must not contain leading or trailing whitespace before preparing persistence")
 
     if Files.exists(root) && !Files.isDirectory(root) then
       throw new IllegalArgumentException(s"data directory must be a directory path, found file: $root")

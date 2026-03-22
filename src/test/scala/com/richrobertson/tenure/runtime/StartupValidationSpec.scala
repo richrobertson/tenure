@@ -27,6 +27,21 @@ class StartupValidationSpec extends CatsEffectSuite:
     assert(result.left.exists(_.getMessage.contains("expected exactly one peer entry for local node")))
   }
 
+  test("cluster config rejects node ids with surrounding whitespace") {
+    val config = ClusterConfig(
+      nodeId = "node-1 ",
+      apiHost = "127.0.0.1",
+      apiPort = 9101,
+      peers = List(
+        PeerNode("node-1 ", "127.0.0.1", 9001, "127.0.0.1", 9101)
+      ),
+      dataDir = "/tmp/tenure-startup-validation-node-id-whitespace"
+    )
+
+    val result = StartupValidation.validateConfig(config)
+    assert(result.left.exists(_.getMessage.contains("nodeId must not include leading or trailing whitespace")))
+  }
+
   test("cluster config rejects duplicate peer ids") {
     val config = ClusterConfig(
       nodeId = "node-1",
@@ -255,6 +270,14 @@ class StartupValidationSpec extends CatsEffectSuite:
     IO.blocking(Files.createTempDirectory("tenure-startup-blank-node-id")).flatMap { root =>
       RaftPersistence.fileBacked[IO](root.toString, "   ", Observability.noop[IO]).attempt.map { result =>
         assert(result.left.exists(_.getMessage.contains("nodeId must be non-empty")))
+      }
+    }
+  }
+
+  test("file-backed persistence rejects node ids with surrounding whitespace") {
+    IO.blocking(Files.createTempDirectory("tenure-startup-node-id-whitespace")).flatMap { root =>
+      RaftPersistence.fileBacked[IO](root.toString, " node-a ", Observability.noop[IO]).attempt.map { result =>
+        assert(result.left.exists(_.getMessage.contains("must not contain leading or trailing whitespace")))
       }
     }
   }

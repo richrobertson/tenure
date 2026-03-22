@@ -40,6 +40,7 @@ object StartupValidation:
   def validateConfig(config: ClusterConfig): Either[IllegalArgumentException, ClusterConfig] =
     for
       _ <- nonEmpty("nodeId", config.nodeId)
+      _ <- noSurroundingWhitespace("nodeId", config.nodeId)
       _ <- nonEmpty("dataDir", config.dataDir)
       _ <- noSurroundingWhitespace("config apiHost", config.apiHost)
       _ <- ensure(config.peers.nonEmpty, "peers must contain at least one node")
@@ -60,6 +61,7 @@ object StartupValidation:
   private def validatePeer(peer: PeerNode): Either[IllegalArgumentException, Unit] =
     for
       _ <- nonEmpty("peer.nodeId", peer.nodeId)
+      _ <- noSurroundingWhitespace("peer.nodeId", peer.nodeId)
       _ <- noSurroundingWhitespace(s"peer '${peer.nodeId}' raft host", peer.host)
       _ <- noSurroundingWhitespace(s"peer '${peer.nodeId}' apiHost", peer.apiHost)
       _ <- ensure(isExplicitHost(peer.host), s"peer '${peer.nodeId}' raft host '${peer.host}' must be an explicit IP or localhost; DNS names are not supported in v1")
