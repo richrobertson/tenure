@@ -80,6 +80,16 @@ Milestone 8 is now complete. The repo now includes startup/config hardening for 
 - [Milestone 7 routing/multi-group demo](docs/demo/milestone-7.md)
 - [Milestone 8 hardening/benchmark demo](docs/demo/milestone-8.md)
 
+## Author site and related writing
+
+- [www.myrobertson.com](https://www.myrobertson.com)
+- [Engineering blog](https://www.myrobertson.com/blog/index.html)
+- [Designing a Correct Distributed Lease Service: Tenure on Raft](https://www.myrobertson.com/blog/designing-a-correct-distributed-lease-service-tenure-on-raft.html)
+- [What Is a Distributed Lock? (With Examples)](https://www.myrobertson.com/blog/what-is-a-distributed-lock-with-examples.html)
+- [Raft vs Paxos vs EPaxos: A Practical Guide](https://www.myrobertson.com/blog/raft-vs-paxos-vs-epaxos-practical-guide.html)
+- [Architecting a Multitenant Control Plane for a Next-Generation Data Tier](https://www.myrobertson.com/blog/architecting-a-multitenant-control-plane-for-a-next-generation-data-tier.html)
+- [Backpressure in Distributed Systems: Stability, Correctness, and Graceful Degradation](https://www.myrobertson.com/blog/backpressure-stability-correctness-distributed-systems.html)
+
 ## Why leases are different from simple distributed locks
 
 A lock service can stop at mutual exclusion. A lease service must also define what happens when time passes, nodes fail, clients retry, or an old holder continues acting after ownership has logically expired. Tenure therefore treats TTLs, authoritative expiration decisions, idempotency, and fencing tokens as part of the core contract rather than optional details.
