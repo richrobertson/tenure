@@ -95,3 +95,21 @@ Milestone 8 is complete. The repo now adds explicit clustered startup validation
 - **Validation artifact:** Benchmark/demo report with commands, scenarios, expected outcomes, and known limits.
 - **Demo/test expectation:** A reviewer can start the local cluster, run the demo flows, observe the expected correctness and failure behavior, and run a simple repeatable benchmark without hidden setup.
 - **Done means:** Tenure has a credible, repeatable local evaluation story and the obvious v1 sharp edges are guarded by explicit validation and startup checks.
+
+## Milestone 9: static multi-group clustered deployment and placement control *(planned)*
+
+- **Objective:** Move from local multi-group simulation to a real clustered multi-group mode with explicit static placement and per-group correctness boundaries.
+- **Deliverables:** Static-config multi-group cluster manifests, clustered `GroupRuntime` execution across more than one Raft group, placement resolution for routed reads and writes in clustered mode, tenant-safe cross-group read aggregation where required by the existing API, and per-group recovery/observability coverage.
+- **Out of scope:** Live online rebalancing, automatic shard splitting, cross-group transactions, and any control-plane dependency for placement or bootstrap.
+- **Validation artifact:** A multi-group cluster runbook plus deterministic test output covering routing, per-group leader loss, restart recovery, and tenant-scoped list behavior without cross-tenant scans.
+- **Demo/test expectation:** A reviewer can boot a small static-config cluster with multiple Raft groups, issue lease operations for resources that map to different groups, observe independent per-group leadership and failover, and confirm that routed reads and writes preserve the existing lease API semantics.
+- **Done means:** Tenure can run more than one authoritative Raft group in clustered mode with explicit static placement, preserve tenant isolation and fencing semantics across groups, recover each group independently from local disk, and avoid correctness arguments that depend on global scans across all tenants or all resources.
+
+## Milestone 10: controlled rebalancing and shard migration safety *(planned)*
+
+- **Objective:** Introduce explicit placement changes so resources can move between Raft groups without weakening lease safety, tenant isolation, or fencing guarantees.
+- **Deliverables:** A versioned placement-map model, an administrative placement-change workflow, resource migration phases with explicit source/target authority boundaries, routed request handling during migration, and recovery rules for interrupted migration.
+- **Out of scope:** Fully automatic background balancing, cross-group atomic transactions, elastic membership orchestration, and any design that requires global scans across all tenants or all resources during steady-state operation.
+- **Validation artifact:** A migration correctness runbook plus deterministic test output covering move initiation, in-flight request handling, failover during migration, restart recovery, and stale-owner rejection after a completed move.
+- **Demo/test expectation:** A reviewer can move a resource range or placement bucket from one group to another in a static cluster, observe the handoff of authoritative ownership, verify that reads and writes route correctly throughout the transition, and confirm that stale actors from the source group are rejected by fencing and placement-version checks.
+- **Done means:** Tenure supports operator-directed placement changes between groups with explicit transition states, durable recovery of migration progress, unchanged client-visible lease semantics, and a correctness story that remains bootstrap-safe and independent of external control-plane services.
