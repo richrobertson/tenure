@@ -58,6 +58,10 @@ Milestone 5 is now complete. The repo now contains explicit local-disk recovery 
 
 Milestone 8 is now complete. The repo now includes startup/config hardening for the clustered daemon path, a repeatable local evaluation harness for demo and benchmark scenarios, and a reviewer-friendly runbook for validating v1 behavior and limits without hidden setup.
 
+Milestone 9 is planned as the first post-v1 scaling milestone: static multi-group clustered deployment with explicit placement control, routed multi-group correctness, and per-group recovery/failover validation.
+
+Milestone 10 is planned as the next scaling step after that: controlled rebalancing and shard migration safety, with explicit placement changes and durable handoff rules between groups.
+
 ## Project documents
 
 - [Docs index](docs/index.md)
@@ -100,7 +104,7 @@ Tenure is intentionally scoped at the point where distributed-systems correctnes
 
 ## Future work
 
-Milestone 8 is now complete. The repo now has a credible local evaluation path and tighter startup validation, but it still does not implement live rebalancing, shard migration, cross-node multi-group leadership coordination, production deployment automation, or a broader production-readiness program.
+Milestone 8 is now complete. The next planned steps are Milestone 9 and Milestone 10. Milestone 9 would turn the existing routing and multi-group seams into a real clustered capability with explicit static placement, routed multi-group reads and writes, and per-group failover/recovery validation. Milestone 10 would then add controlled placement changes and shard migration safety without introducing cross-group transactions, automatic elastic balancing, or a broader production-readiness program.
 
 ## Local prototype
 
